@@ -20,11 +20,11 @@
 3. 在 LSPosed 中勾选「智能侧边栏」（`com.coloros.smartsidebar`）作用域
 4. 强制停止智能侧边栏后重新打开即可
 
-## 适配
+## 测试设备版本
 
 - 真我 GT8 Pro（ColorOS / realme UI）
 - 智能侧边栏版本 v16.14.6
-- 其他 OPPO/真我设备理论通用，如遇问题请提 Issue
+- 其他 OPPO/真我设备理论通用，如遇问题请提 Issue或者找酷安作者：时安Halcyon
 
 ## 免责声明
 
