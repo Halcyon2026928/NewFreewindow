@@ -1,28 +1,23 @@
-# sidebar-hook
+# free window
 
-> 解除真我/OPPO 智能侧边栏最多添加 20 个应用限制的 LSPosed 模块
-
-![platform](https://img.shields.io/badge/Platform-Android-3DDC84?logo=android)
-![xposed](https://img.shields.io/badge/Xposed-LSPosed-blue)
-![license](https://img.shields.io/badge/License-MIT-green)
+LSPosed 模块，隐藏 ColorOS / 真我系统自由小窗底部的手势小横条。
 
 ## 功能
 
-- 解除智能侧边栏编辑模式下最多添加 20 个应用/工具的限制
-- 纯模块，无桌面图标，无设置页面，勾选作用域即生效
+- 隐藏自由小窗底部的小横条
 
-## 使用方式
+## 适用系统
 
-1. 安装并启用 LSPosed
-2. 安装本模块 APK
-3. 在 LSPosed 中勾选「智能侧边栏」（`com.coloros.smartsidebar`）作用域
-4. 强制停止智能侧边栏后重新打开即可
+- 真我GT5/真我GT8 pro最新系统版本 已测试
+- 理论上欧加真所有设备通用，如遇问题请提 Issue或者找酷安作者@时安Halcyon
 
-## 测试设备版本
+## 使用方法
 
-- 真我 GT8 Pro（ColorOS / realme UI）
-- 智能侧边栏版本 v16.14.6
-- 其他 OPPO/真我设备理论通用，如遇问题请提 Issue或者找酷安作者：时安Halcyon
+1. 安装本模块 APK
+2. 在 LSPosed 中启用模块
+3. 勾选 **「系统框架」**（android）作用域
+4. 重启手机
+5. 打开自由小窗，底部小横条已隐藏
 
 ## 免责声明
 

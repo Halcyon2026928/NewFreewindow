@@ -3,11 +3,11 @@ plugins {
 }
 
 android {
-    namespace 'com.sidebar.vip'
+    namespace 'com.freewindow.vip'
     compileSdk 34
 
     defaultConfig {
-        applicationId "com.sidebar.vip"
+        applicationId "com.freewindow.vip"
         minSdk 21
         targetSdk 34
         versionCode 11
@@ -33,7 +33,7 @@ android {
     androidComponents {
         onVariants(selector().all()) { variant ->
             variant.outputs.forEach { output ->
-                output.outputFileName.set("sidebar-${variant.buildType}.apk")
+                output.outputFileName.set("freewindow-${variant.buildType}.apk")
             }
         }
     }

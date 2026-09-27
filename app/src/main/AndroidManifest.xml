@@ -13,7 +13,7 @@
 
         <meta-data
             android:name="xposeddescription"
-            android:value="解除智能侧边栏最多添加20个应用的限制，勾选智能侧边栏作用域即生效" />
+            android:value="隐藏自由小窗底部手势小横条" />
 
         <meta-data
             android:name="xposedminversion"
@@ -21,7 +21,7 @@
 
         <meta-data
             android:name="xposedscope"
-            android:value="com.coloros.smartsidebar" />
+            android:value="android" />
 
     </application>
 
