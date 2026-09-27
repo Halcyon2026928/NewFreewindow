@@ -1,23 +1,31 @@
-# 🚀 sidebar
+# sidebar-hook
 
-> LSPosed 模块（当前为空骨架，无功能）
+> 解除真我/OPPO 智能侧边栏最多添加 20 个应用限制的 LSPosed 模块
 
 ![platform](https://img.shields.io/badge/Platform-Android-3DDC84?logo=android)
 ![xposed](https://img.shields.io/badge/Xposed-LSPosed-blue)
 ![license](https://img.shields.io/badge/License-MIT-green)
 
-## 📝 说明
+## 功能
 
-- 保留 LSPosed 模块入口（`MainHook`），后续可在此基础上实现新功能（如侧边栏 sidebar）
+- 解除智能侧边栏编辑模式下最多添加 20 个应用/工具的限制
+- 修复清理后台后超 20 个应用列表被截断的问题
+- 修复超 20 个应用时添加成功但不显示的问题
+- 纯模块，无桌面图标，无设置页面，勾选作用域即生效
 
-## 🛠️ 使用方式
+## 使用方式
 
 1. 安装并启用 LSPosed
 2. 安装本模块 APK
-3. 在 LSPosed 中勾选作用域
-4. 重启勾选作用域应用即可
+3. 在 LSPosed 中勾选「智能侧边栏」（`com.coloros.smartsidebar`）作用域
+4. 强制停止智能侧边栏后重新打开即可
 
-## ⚠️ 免责声明
+## 适配
 
-- 本项目仅供学习与研究用途，请勿用于违反设备使用协议或当地法律法规的场景
+- 真我 GT8 Pro（ColorOS / realme UI）
+- 智能侧边栏版本 v16.14.6
+- 其他 OPPO/真我设备理论通用，如遇问题请提 Issue
 
+## 免责声明
+
+本项目仅供学习与研究用途，请勿用于违反设备使用协议或当地法律法规的场景。
