@@ -13,7 +13,7 @@
 
         <meta-data
             android:name="xposeddescription"
-            android:value="隐藏自由小窗底部手势小横条" />
+            android:value="隐藏自由小窗底部手势小横条，重启设备即可生效" />
 
         <meta-data
             android:name="xposedminversion"
