@@ -3,11 +3,11 @@ plugins {
 }
 
 android {
-    namespace 'io.github.SionCollective.freewindow'
+    namespace 'io.github.halcyon2026928.freewindow'
     compileSdk 34
 
     defaultConfig {
-        applicationId "io.github.SionCollective.freewindow"
+        applicationId "io.github.halcyon2026928.freewindow"
         minSdk 21
         targetSdk 34
         versionCode 11
