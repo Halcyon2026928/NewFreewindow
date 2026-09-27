@@ -3,11 +3,11 @@ plugins {
 }
 
 android {
-    namespace 'com.freewindow.vip'
+    namespace 'io.github.SionCollective.freewindow'
     compileSdk 34
 
     defaultConfig {
-        applicationId "com.freewindow.vip"
+        applicationId "io.github.SionCollective.freewindow"
         minSdk 21
         targetSdk 34
         versionCode 11
