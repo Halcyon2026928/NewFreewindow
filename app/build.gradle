@@ -3,13 +3,13 @@ plugins {
 }
 
 android {
-    namespace 'com.lively.xp'
-    compileSdk 33
+    namespace 'com.sidebar.vip'
+    compileSdk 34
 
     defaultConfig {
-        applicationId "com.lively.xp"
+        applicationId "com.sidebar.vip"
         minSdk 21
-        targetSdk 33
+        targetSdk 34
         versionCode 11
         versionName "2.0.1"
     }
@@ -30,13 +30,15 @@ android {
         targetCompatibility JavaVersion.VERSION_1_8
     }
 
-    applicationVariants.all { variant ->
-        variant.outputs.all {
-            outputFileName = "LivelyRunHook-${variant.buildType.name}.apk"
+    androidComponents {
+        onVariants(selector().all()) { variant ->
+            variant.outputs.forEach { output ->
+                output.outputFileName.set("sidebar-${variant.buildType}.apk")
+            }
         }
     }
 
-    lintOptions {
+    lint {
         checkReleaseBuilds false
         abortOnError false
     }
