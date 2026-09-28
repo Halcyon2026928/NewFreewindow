@@ -1,4 +1,4 @@
-package com.freewindow.vip;
+package io.github.halcyon2026928.freewindow;
 
 import android.view.View;
 
@@ -38,7 +38,21 @@ public class MainHook implements IXposedHookLoadPackage {
                                 if (bottomHandleView != null) bottomHandleView.setVisibility(View.GONE);
                                 if (bottomHandleLongView != null) bottomHandleLongView.setVisibility(View.GONE);
 
-                                XposedBridge.log(TAG + " hidden freeform bottom handle bar");
+                                // 菜单按钮往上平移20dp
+                                float density = ((View) thisObj).getResources().getDisplayMetrics().density;
+                                int offsetPx = (int) (-20 * density + 0.5f);
+
+                                View controlView = (View) XposedHelpers.getObjectField(thisObj, "mControlView");
+                                View controlBackgroundView = (View) XposedHelpers.getObjectField(thisObj, "mControlBackgroundView");
+
+                                if (controlView != null) {
+                                    controlView.setTranslationY(offsetPx);
+                                }
+                                if (controlBackgroundView != null) {
+                                    controlBackgroundView.setTranslationY(offsetPx);
+                                }
+
+                                XposedBridge.log(TAG + " hidden bottom bar, moved menu up 20dp");
                             } catch (Throwable t) {
                                 XposedBridge.log(TAG + " initCaptionView hook error: " + t.getMessage());
                             }
