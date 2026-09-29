@@ -42,9 +42,11 @@ public class MainHook implements IXposedHookLoadPackage {
         }
     }
 
-    /** 从模块 app 的 ConfigProvider 读取开关状态（首次调用时执行一次并缓存）。 */
+    /** 从模块 app 的 ConfigProvider 读取开关状态。
+     *  每次创建自由小窗（initCaptionView）时重新读取，不缓存——开关修改后
+     *  重新打开自由小窗即生效，无需重启设备；本次读取失败则 configLoaded=false（保守不执行）。 */
     private void loadConfig(Object captionView) {
-        if (configLoaded) return;
+        boolean loaded = false;
         try {
             Context ctx = (Context) XposedHelpers.getObjectField(captionView, "mContext");
             ContentResolver cr = ctx.getContentResolver();
@@ -60,16 +62,17 @@ public class MainHook implements IXposedHookLoadPackage {
                             hideThreeDot = value == 1;
                         }
                     }
-                    configLoaded = true;
+                    loaded = true;
                     XposedBridge.log(TAG + " config -> hideBottomBar=" + hideBottomBar
-                            + " hideThreeDot=" + hideThreeDot + " (reboot then reopen free window to apply)");
+                            + " hideThreeDot=" + hideThreeDot);
                 } finally {
                     c.close();
                 }
             }
         } catch (Throwable t) {
-            XposedBridge.log(TAG + " loadConfig error, keep defaults: " + t.getMessage());
+            XposedBridge.log(TAG + " loadConfig error, keep previous: " + t.getMessage());
         }
+        configLoaded = loaded;
     }
 
     private void hookSystemServer(XC_LoadPackage.LoadPackageParam lpparam) {
@@ -85,6 +88,8 @@ public class MainHook implements IXposedHookLoadPackage {
                             try {
                                 Object thisObj = param.thisObject;
                                 loadConfig(thisObj);
+                                // 配置未读取成功：不执行任何隐藏（保守），下次自由小窗创建时重试
+                                if (!configLoaded) return;
 
                                 // ---- 隐藏底部手势小横条（开关：hide_bottom_bar） ----
                                 if (hideBottomBar) {
@@ -143,8 +148,8 @@ public class MainHook implements IXposedHookLoadPackage {
                         @Override
                         protected void beforeHookedMethod(MethodHookParam param) {
                             try {
-                                if (!configLoaded) loadConfig(param.thisObject);
-                                if (!hideThreeDot) return; // 开关关闭：不做触摸区域挖空
+                                // 直接用最近一次 initCaptionView 读取的开关状态（避免每次触摸都跨进程读配置）
+                                if (!configLoaded || !hideThreeDot) return; // 配置未读取成功或开关关闭：不做触摸区域挖空
 
                                 Region region = (Region) param.args[0];
                                 if (region == null) return;
@@ -184,8 +189,8 @@ public class MainHook implements IXposedHookLoadPackage {
                         @Override
                         protected void beforeHookedMethod(MethodHookParam param) {
                             try {
-                                if (!configLoaded) loadConfig(param.thisObject);
-                                if (!hideThreeDot) return; // 开关关闭：不做点击拦截
+                                // 直接用最近一次 initCaptionView 读取的开关状态（避免每次触摸都跨进程读配置）
+                                if (!configLoaded || !hideThreeDot) return; // 配置未读取成功或开关关闭：不做点击拦截
 
                                 Object thisObj = param.thisObject;
                                 Object regionMgr = XposedHelpers.getObjectField(thisObj, "mFlexibleCaptionViewRegionMgr");
