@@ -21,6 +21,10 @@ public class SettingsActivity extends Activity {
     public static final String KEY_HIDE_BOTTOM_BAR = "hide_bottom_bar";
     public static final String KEY_HIDE_THREE_DOT = "hide_three_dot_menu";
 
+    /** UI 偏好（主题），独立于功能配置 */
+    private static final String UI_PREFS = "ui_prefs";
+    private static final String KEY_LIGHT_THEME = "light_theme";
+
     private Switch bottomBarSwitch;
     private Switch threeDotSwitch;
     /** 程序同步开关状态时置位，避免 setChecked 递归触发监听器 */
@@ -29,7 +33,21 @@ public class SettingsActivity extends Activity {
     @Override
     protected void onCreate(Bundle savedInstanceState) {
         super.onCreate(savedInstanceState);
+        // 主题必须在 setContentView 之前应用
+        setTheme(isLightTheme() ? R.style.LightTheme : R.style.AppTheme);
         setContentView(R.layout.activity_settings);
+
+        // 界面主题切换（仅 UI，不影响功能开关）
+        Switch themeSwitch = findViewById(R.id.switch_theme);
+        themeSwitch.setChecked(isLightTheme());
+        themeSwitch.setOnCheckedChangeListener(new CompoundButton.OnCheckedChangeListener() {
+            @Override
+            public void onCheckedChanged(CompoundButton buttonView, boolean isChecked) {
+                getSharedPreferences(UI_PREFS, Context.MODE_PRIVATE)
+                        .edit().putBoolean(KEY_LIGHT_THEME, isChecked).commit();
+                recreate();
+            }
+        });
 
         bottomBarSwitch = findViewById(R.id.switch_bottom_bar);
         threeDotSwitch = findViewById(R.id.switch_three_dot);
@@ -66,5 +84,10 @@ public class SettingsActivity extends Activity {
     private void writePref(String key, boolean value) {
         getSharedPreferences(PREFS_NAME, Context.MODE_PRIVATE)
                 .edit().putBoolean(key, value).commit();
+    }
+
+    /** UI 偏好：是否使用浅色主题（默认浅色） */
+    private boolean isLightTheme() {
+        return getSharedPreferences(UI_PREFS, Context.MODE_PRIVATE).getBoolean(KEY_LIGHT_THEME, true);
     }
 }

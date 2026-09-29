@@ -1,4 +1,26 @@
 <?xml version="1.0" encoding="utf-8"?>
 <resources>
     <color name="ic_launcher_background">#EAEAE8</color>
+
+    <!-- 潮流深色主题配色 -->
+    <color name="bg_start">#0B1020</color>
+    <color name="bg_mid">#191342</color>
+    <color name="bg_end">#0B1020</color>
+    <color name="accent_1">#8B5CF6</color>
+    <color name="accent_2">#6366F1</color>
+    <color name="card_bg">#1DFFFFFF</color>
+    <color name="card_stroke">#22FFFFFF</color>
+    <color name="text_primary">#FFFFFF</color>
+    <color name="text_secondary">#94A3B8</color>
+    <color name="text_hint">#64748B</color>
+
+    <!-- 浅色主题配色 -->
+    <color name="light_bg_start">#F1F5F9</color>
+    <color name="light_bg_mid">#E0E7FF</color>
+    <color name="light_bg_end">#F1F5F9</color>
+    <color name="light_card">#FFFFFFFF</color>
+    <color name="light_card_stroke">#140F172A</color>
+    <color name="light_text_primary">#0F172A</color>
+    <color name="light_text_secondary">#64748B</color>
+    <color name="light_text_hint">#94A3B8</color>
 </resources>

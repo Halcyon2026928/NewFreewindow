@@ -1,0 +1,10 @@
+<?xml version="1.0" encoding="utf-8"?>
+<resources>
+    <!-- 主题化资源：深色/浅色两套主题分别提供不同实现 -->
+    <attr name="fwBackground" format="reference" />
+    <attr name="fwCardBackground" format="reference" />
+    <attr name="fwPillBackground" format="reference" />
+    <attr name="fwTextPrimary" format="reference" />
+    <attr name="fwTextSecondary" format="reference" />
+    <attr name="fwTextHint" format="reference" />
+</resources>

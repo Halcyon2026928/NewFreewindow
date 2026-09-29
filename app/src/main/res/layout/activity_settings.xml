@@ -2,39 +2,93 @@
 <LinearLayout xmlns:android="http://schemas.android.com/apk/res/android"
     android:layout_width="match_parent"
     android:layout_height="match_parent"
+    android:background="?attr/fwBackground"
     android:orientation="vertical"
-    android:padding="16dp">
+    android:padding="20dp">
 
+    <!-- 顶部渐变胶囊标签 -->
     <TextView
         android:layout_width="wrap_content"
         android:layout_height="wrap_content"
-        android:text="@string/settings_title"
-        android:textSize="20sp"
-        android:textStyle="bold"
-        android:textColor="#1A1A1A" />
+        android:background="?attr/fwPillBackground"
+        android:paddingLeft="14dp"
+        android:paddingTop="6dp"
+        android:paddingRight="14dp"
+        android:paddingBottom="6dp"
+        android:text="FREE WINDOW · 自由小窗增强"
+        android:textColor="@color/text_primary"
+        android:textSize="11sp"
+        android:letterSpacing="0.12" />
 
+    <!-- 大标题 -->
+    <TextView
+        android:layout_width="wrap_content"
+        android:layout_height="wrap_content"
+        android:layout_marginTop="16dp"
+        android:text="@string/settings_title"
+        android:textColor="?attr/fwTextPrimary"
+        android:textSize="26sp"
+        android:textStyle="bold"
+        android:letterSpacing="0.02" />
+
+    <!-- 副标题 -->
     <TextView
         android:layout_width="wrap_content"
         android:layout_height="wrap_content"
         android:layout_marginTop="4dp"
         android:text="@string/settings_subtitle"
-        android:textSize="13sp"
-        android:textColor="#8A8A8A" />
+        android:textColor="?attr/fwTextSecondary"
+        android:textSize="13sp" />
 
-    <View
-        android:layout_width="match_parent"
-        android:layout_height="1dp"
-        android:layout_marginTop="14dp"
-        android:background="#E0E0E0" />
-
-    <!-- 隐藏窗口白条 -->
+    <!-- 卡片 0：界面主题 -->
     <LinearLayout
         android:layout_width="match_parent"
         android:layout_height="wrap_content"
-        android:orientation="horizontal"
+        android:layout_marginTop="24dp"
+        android:background="?attr/fwCardBackground"
         android:gravity="center_vertical"
-        android:paddingTop="16dp"
-        android:paddingBottom="16dp">
+        android:orientation="horizontal"
+        android:padding="18dp">
+
+        <LinearLayout
+            android:layout_width="0dp"
+            android:layout_height="wrap_content"
+            android:layout_weight="1"
+            android:orientation="vertical">
+
+            <TextView
+                android:layout_width="wrap_content"
+                android:layout_height="wrap_content"
+                android:text="@string/theme_title"
+                android:textColor="?attr/fwTextPrimary"
+                android:textSize="16sp"
+                android:textStyle="bold" />
+
+            <TextView
+                android:layout_width="wrap_content"
+                android:layout_height="wrap_content"
+                android:layout_marginTop="3dp"
+                android:text="@string/theme_desc"
+                android:textColor="?attr/fwTextSecondary"
+                android:textSize="12sp" />
+        </LinearLayout>
+
+        <Switch
+            android:id="@+id/switch_theme"
+            android:layout_width="wrap_content"
+            android:layout_height="wrap_content"
+            android:layout_marginStart="16dp" />
+    </LinearLayout>
+
+    <!-- 卡片 1：隐藏窗口白条 -->
+    <LinearLayout
+        android:layout_width="match_parent"
+        android:layout_height="wrap_content"
+        android:layout_marginTop="14dp"
+        android:background="?attr/fwCardBackground"
+        android:gravity="center_vertical"
+        android:orientation="horizontal"
+        android:padding="18dp">
 
         <LinearLayout
             android:layout_width="0dp"
@@ -46,37 +100,35 @@
                 android:layout_width="wrap_content"
                 android:layout_height="wrap_content"
                 android:text="@string/hide_bottom_bar_title"
+                android:textColor="?attr/fwTextPrimary"
                 android:textSize="16sp"
-                android:textColor="#1A1A1A" />
+                android:textStyle="bold" />
 
             <TextView
                 android:layout_width="wrap_content"
                 android:layout_height="wrap_content"
-                android:layout_marginTop="2dp"
+                android:layout_marginTop="3dp"
                 android:text="@string/hide_bottom_bar_desc"
-                android:textSize="12sp"
-                android:textColor="#8A8A8A" />
+                android:textColor="?attr/fwTextSecondary"
+                android:textSize="12sp" />
         </LinearLayout>
 
         <Switch
             android:id="@+id/switch_bottom_bar"
             android:layout_width="wrap_content"
-            android:layout_height="wrap_content" />
+            android:layout_height="wrap_content"
+            android:layout_marginStart="16dp" />
     </LinearLayout>
 
-    <View
-        android:layout_width="match_parent"
-        android:layout_height="1dp"
-        android:background="#E0E0E0" />
-
-    <!-- 隐藏三点菜单栏 -->
+    <!-- 卡片 2：隐藏三点菜单栏 -->
     <LinearLayout
         android:layout_width="match_parent"
         android:layout_height="wrap_content"
-        android:orientation="horizontal"
+        android:layout_marginTop="14dp"
+        android:background="?attr/fwCardBackground"
         android:gravity="center_vertical"
-        android:paddingTop="16dp"
-        android:paddingBottom="16dp">
+        android:orientation="horizontal"
+        android:padding="18dp">
 
         <LinearLayout
             android:layout_width="0dp"
@@ -88,35 +140,34 @@
                 android:layout_width="wrap_content"
                 android:layout_height="wrap_content"
                 android:text="@string/hide_three_dot_title"
+                android:textColor="?attr/fwTextPrimary"
                 android:textSize="16sp"
-                android:textColor="#1A1A1A" />
+                android:textStyle="bold" />
 
             <TextView
                 android:layout_width="wrap_content"
                 android:layout_height="wrap_content"
-                android:layout_marginTop="2dp"
+                android:layout_marginTop="3dp"
                 android:text="@string/hide_three_dot_desc"
-                android:textSize="12sp"
-                android:textColor="#8A8A8A" />
+                android:textColor="?attr/fwTextSecondary"
+                android:textSize="12sp" />
         </LinearLayout>
 
         <Switch
             android:id="@+id/switch_three_dot"
             android:layout_width="wrap_content"
-            android:layout_height="wrap_content" />
+            android:layout_height="wrap_content"
+            android:layout_marginStart="16dp" />
     </LinearLayout>
 
-    <View
-        android:layout_width="match_parent"
-        android:layout_height="1dp"
-        android:background="#E0E0E0" />
-
+    <!-- 底部提示 -->
     <TextView
-        android:layout_width="wrap_content"
+        android:layout_width="match_parent"
         android:layout_height="wrap_content"
-        android:layout_marginTop="16dp"
+        android:layout_marginTop="20dp"
+        android:gravity="center"
         android:text="@string/settings_hint"
-        android:textSize="12sp"
-        android:textColor="#8A8A8A" />
+        android:textColor="?attr/fwTextHint"
+        android:textSize="12sp" />
 
 </LinearLayout>

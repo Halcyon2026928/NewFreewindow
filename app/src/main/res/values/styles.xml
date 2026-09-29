@@ -1,0 +1,28 @@
+<?xml version="1.0" encoding="utf-8"?>
+<resources>
+    <style name="AppTheme" parent="android:style/Theme.Material.NoActionBar">
+        <item name="android:windowBackground">@drawable/bg_gradient</item>
+        <item name="android:statusBarColor">@color/bg_start</item>
+        <item name="android:navigationBarColor">@color/bg_start</item>
+        <item name="android:windowLightStatusBar">false</item>
+        <item name="fwBackground">@drawable/bg_gradient</item>
+        <item name="fwCardBackground">@drawable/bg_card</item>
+        <item name="fwPillBackground">@drawable/bg_pill</item>
+        <item name="fwTextPrimary">@color/text_primary</item>
+        <item name="fwTextSecondary">@color/text_secondary</item>
+        <item name="fwTextHint">@color/text_hint</item>
+    </style>
+
+    <style name="LightTheme" parent="android:style/Theme.Material.Light.NoActionBar">
+        <item name="android:windowBackground">@drawable/bg_gradient_light</item>
+        <item name="android:statusBarColor">@color/light_bg_start</item>
+        <item name="android:navigationBarColor">@color/light_bg_start</item>
+        <item name="android:windowLightStatusBar">true</item>
+        <item name="fwBackground">@drawable/bg_gradient_light</item>
+        <item name="fwCardBackground">@drawable/bg_card_light</item>
+        <item name="fwPillBackground">@drawable/bg_pill</item>
+        <item name="fwTextPrimary">@color/light_text_primary</item>
+        <item name="fwTextSecondary">@color/light_text_secondary</item>
+        <item name="fwTextHint">@color/light_text_hint</item>
+    </style>
+</resources>
