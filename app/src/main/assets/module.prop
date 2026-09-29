@@ -1,6 +1,6 @@
 id=io.github.halcyon2026928.freewindow
 name=freewindow
-version=v2.0.1
-versionCode=11
+version=v2.0.3
+versionCode=13
 author=halcyon2026928
-description=隐藏自由小窗底部手势小横条，重启设备即可生效
+description=隐藏自由小窗底部手势小横条，移除顶部三点菜单按钮（视觉/点击/触摸穿透），重启设备即可生效
