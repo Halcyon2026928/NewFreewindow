@@ -7,13 +7,30 @@
         android:roundIcon="@mipmap/ic_launcher"
         android:label="@string/app_name">
 
+        <activity
+            android:name=".SettingsActivity"
+            android:exported="true"
+            android:label="@string/app_name"
+            android:theme="@android:style/Theme.Material.Light.DarkActionBar">
+            <intent-filter>
+                <action android:name="android.intent.action.MAIN" />
+                <category android:name="android.intent.category.LAUNCHER" />
+            </intent-filter>
+        </activity>
+
+        <!-- 配置通道：hook 侧（system_server）经 ContentResolver 跨进程读取开关配置 -->
+        <provider
+            android:name=".ConfigProvider"
+            android:authorities="io.github.halcyon2026928.freewindow.config"
+            android:exported="true" />
+
         <meta-data
             android:name="xposedmodule"
             android:value="true" />
 
         <meta-data
             android:name="xposeddescription"
-            android:value="隐藏自由小窗底部手势小横条，移除顶部三点菜单按钮（视觉/点击/触摸穿透），重启设备即可生效" />
+            android:value="隐藏自由小窗底部白条 / 顶部三点菜单栏，可独立开关，重启设备即可生效" />
 
         <meta-data
             android:name="xposedminversion"

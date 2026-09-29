@@ -1,4 +1,15 @@
 <?xml version="1.0" encoding="utf-8"?>
 <resources>
     <string name="app_name">freewindow</string>
+
+    <string name="settings_title">freewindow 设置</string>
+    <string name="settings_subtitle">自由小窗装饰项，可独立开关</string>
+
+    <string name="hide_bottom_bar_title">隐藏窗口白条</string>
+    <string name="hide_bottom_bar_desc">隐藏自由小窗底部的白色手势横条</string>
+
+    <string name="hide_three_dot_title">隐藏三点菜单栏</string>
+    <string name="hide_three_dot_desc">移除顶部三点按钮（视觉、点击、触摸穿透）</string>
+
+    <string name="settings_hint">开关后重启设备即可生效</string>
 </resources>

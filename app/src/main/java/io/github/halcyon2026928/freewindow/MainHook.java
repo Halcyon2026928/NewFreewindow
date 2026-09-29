@@ -1,5 +1,8 @@
 package io.github.halcyon2026928.freewindow;
 
+import android.content.ContentResolver;
+import android.content.Context;
+import android.database.Cursor;
 import android.graphics.Rect;
 import android.graphics.Region;
 import android.view.MotionEvent;
@@ -19,8 +22,18 @@ public class MainHook implements IXposedHookLoadPackage {
 
     private static final String TAG = "[freewindow-hook]";
 
+    /** 配置在模块 app 的 SharedPreferences 中（与 SettingsActivity 一致），经 ConfigProvider 暴露。 */
+    private static final String KEY_HIDE_BOTTOM_BAR = "hide_bottom_bar";
+    private static final String KEY_HIDE_THREE_DOT = "hide_three_dot_menu";
+
     /** 设为 true 时会把 FlexibleTaskCaptionView 的完整视图树打印到 Xposed 日志，便于在真机上确认三点按钮的确切 id。 */
     private static final boolean DUMP_CAPTION_TREE = false;
+
+    /** 开关状态。首次自由小窗创建时经 ConfigProvider 跨进程读取（Binder/Provider 机制，
+     *  无 SELinux/ROM 写入限制）；修改后重启系统框架，重新打开自由小窗即按新配置生效。 */
+    private boolean hideBottomBar = true;
+    private boolean hideThreeDot = true;
+    private boolean configLoaded = false;
 
     @Override
     public void handleLoadPackage(XC_LoadPackage.LoadPackageParam lpparam) {
@@ -29,29 +42,64 @@ public class MainHook implements IXposedHookLoadPackage {
         }
     }
 
+    /** 从模块 app 的 ConfigProvider 读取开关状态（首次调用时执行一次并缓存）。 */
+    private void loadConfig(Object captionView) {
+        if (configLoaded) return;
+        try {
+            Context ctx = (Context) XposedHelpers.getObjectField(captionView, "mContext");
+            ContentResolver cr = ctx.getContentResolver();
+            Cursor c = cr.query(ConfigProvider.CONFIG_URI, null, null, null, null);
+            if (c != null) {
+                try {
+                    while (c.moveToNext()) {
+                        String key = c.getString(0);
+                        int value = c.getInt(1);
+                        if (KEY_HIDE_BOTTOM_BAR.equals(key)) {
+                            hideBottomBar = value == 1;
+                        } else if (KEY_HIDE_THREE_DOT.equals(key)) {
+                            hideThreeDot = value == 1;
+                        }
+                    }
+                    configLoaded = true;
+                    XposedBridge.log(TAG + " config -> hideBottomBar=" + hideBottomBar
+                            + " hideThreeDot=" + hideThreeDot + " (reboot then reopen free window to apply)");
+                } finally {
+                    c.close();
+                }
+            }
+        } catch (Throwable t) {
+            XposedBridge.log(TAG + " loadConfig error, keep defaults: " + t.getMessage());
+        }
+    }
+
     private void hookSystemServer(XC_LoadPackage.LoadPackageParam lpparam) {
         try {
             Class<?> captionViewClass = XposedHelpers.findClass(
                     "com.android.server.wm.FlexibleTaskCaptionView", lpparam.classLoader);
 
+            // 注册 initCaptionView：首次自由小窗创建时读取开关配置，并按开关执行
             XposedHelpers.findAndHookMethod(captionViewClass, "initCaptionView",
                     new XC_MethodHook() {
                         @Override
                         protected void afterHookedMethod(MethodHookParam param) {
                             try {
                                 Object thisObj = param.thisObject;
+                                loadConfig(thisObj);
 
-                                // ---- 隐藏底部手势小横条（原有功能） ----
-                                View bottomFrame = (View) XposedHelpers.getObjectField(thisObj, "mBottomFrame");
-                                View bottomHandleView = (View) XposedHelpers.getObjectField(thisObj, "mBottomHandleView");
-                                View bottomHandleLongView = (View) XposedHelpers.getObjectField(thisObj, "mBottomHandleLongView");
+                                // ---- 隐藏底部手势小横条（开关：hide_bottom_bar） ----
+                                if (hideBottomBar) {
+                                    View bottomFrame = (View) XposedHelpers.getObjectField(thisObj, "mBottomFrame");
+                                    View bottomHandleView = (View) XposedHelpers.getObjectField(thisObj, "mBottomHandleView");
+                                    View bottomHandleLongView = (View) XposedHelpers.getObjectField(thisObj, "mBottomHandleLongView");
 
-                                if (bottomFrame != null) bottomFrame.setVisibility(View.GONE);
-                                if (bottomHandleView != null) bottomHandleView.setVisibility(View.GONE);
-                                if (bottomHandleLongView != null) bottomHandleLongView.setVisibility(View.GONE);
+                                    if (bottomFrame != null) bottomFrame.setVisibility(View.GONE);
+                                    if (bottomHandleView != null) bottomHandleView.setVisibility(View.GONE);
+                                    if (bottomHandleLongView != null) bottomHandleLongView.setVisibility(View.GONE);
+                                    XposedBridge.log(TAG + " hidden freeform bottom handle bar");
+                                }
 
-                                // ---- 移除顶部三点菜单按钮（新增） ----
-                                if (thisObj instanceof View) {
+                                // ---- 移除顶部三点菜单按钮（开关：hide_three_dot_menu） ----
+                                if (hideThreeDot && thisObj instanceof View) {
                                     View captionRoot = (View) thisObj;
                                     if (DUMP_CAPTION_TREE) {
                                         dumpViewTree(captionRoot, 0);
@@ -63,29 +111,17 @@ public class MainHook implements IXposedHookLoadPackage {
                                         XposedBridge.log(TAG + " three-dot menu button not found (try DUMP_CAPTION_TREE=true to locate its id)");
                                     }
                                 }
-
-                                XposedBridge.log(TAG + " hidden freeform bottom handle bar & removed top menu button");
                             } catch (Throwable t) {
                                 XposedBridge.log(TAG + " initCaptionView hook error: " + t.getMessage());
                             }
                         }
                     });
+            XposedBridge.log(TAG + " FlexibleTaskCaptionView.initCaptionView hook success");
 
-            XposedBridge.log(TAG + " FlexibleTaskCaptionView hook success");
-
-            // 第二层：拦截三点按钮区域的点击功能（视觉已移除，但触摸区域在
-            // FlexibleCaptionViewTouchRegionMgr 中独立计算，不随视图树删除而消失）。
-            // 触摸链路：dispatchTouchEvent → calculateActionFlag → mActionFlag
-            //          → mGestureDetector.onTouchEvent → onSingleTapUp(e, mActionFlag)
-            // case 1(HANDLE_EVENT) 且触摸点落在 mHandleButtonRegion（三点按钮区域）时
-            // 会 notifySystemEvent(task, 1001) 弹出自由小窗菜单。
+            // 第二层：拦截三点按钮区域的点击功能（开关：hide_three_dot_menu）
             hookSingleTapUpMenuBlock(captionViewClass);
 
-            // 第三层：让触摸穿透应用。标题栏窗口的触摸区域（mRegion）由
-            // FlexibleCaptionViewTouchRegionMgr 独立计算并经 updateTouchableRegion()
-            // 应用到 SurfaceControl；若只移除视觉与点击功能，三点按钮原位置仍会被
-            // 标题栏窗口拦截触摸（透明墙）。这里把 mHandleButtonRegion 从触摸区域中
-            // 挖空（Region.Op.DIFFERENCE），让该位置触摸直接穿透到下方应用。
+            // 第三层：让触摸穿透应用（开关：hide_three_dot_menu）
             hookTouchThroughCarve(captionViewClass);
         } catch (Throwable t) {
             XposedBridge.log(TAG + " hook FlexibleTaskCaptionView failed: " + t.getMessage());
@@ -107,6 +143,9 @@ public class MainHook implements IXposedHookLoadPackage {
                         @Override
                         protected void beforeHookedMethod(MethodHookParam param) {
                             try {
+                                if (!configLoaded) loadConfig(param.thisObject);
+                                if (!hideThreeDot) return; // 开关关闭：不做触摸区域挖空
+
                                 Region region = (Region) param.args[0];
                                 if (region == null) return;
 
@@ -145,6 +184,9 @@ public class MainHook implements IXposedHookLoadPackage {
                         @Override
                         protected void beforeHookedMethod(MethodHookParam param) {
                             try {
+                                if (!configLoaded) loadConfig(param.thisObject);
+                                if (!hideThreeDot) return; // 开关关闭：不做点击拦截
+
                                 Object thisObj = param.thisObject;
                                 Object regionMgr = XposedHelpers.getObjectField(thisObj, "mFlexibleCaptionViewRegionMgr");
                                 if (regionMgr == null) return;

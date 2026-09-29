@@ -9,9 +9,12 @@ android {
     defaultConfig {
         applicationId "io.github.halcyon2026928.freewindow"
         minSdk 21
-        targetSdk 34
-        versionCode 13
-        versionName "2.0.3"
+        // targetSdk 必须 < 33：Android 13+ 对 targetSdk>=33 的应用禁止写 Settings.System
+        //（enforceRestrictedSystemSettingsMutationForCallingPackage 抛 SecurityException），
+        // 降到 32 仅警告、放行写入；模块为 Xposed 用途，不受 targetSdk 影响。
+        targetSdk 32
+        versionCode 14
+        versionName "2.1.0"
     }
 
     buildTypes {
