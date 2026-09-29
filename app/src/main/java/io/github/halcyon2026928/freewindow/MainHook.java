@@ -43,10 +43,10 @@ public class MainHook implements IXposedHookLoadPackage {
     }
 
     /** 从模块 app 的 ConfigProvider 读取开关状态。
-     *  每次创建自由小窗（initCaptionView）时重新读取，不缓存——开关修改后
-     *  重新打开自由小窗即生效，无需重启设备；本次读取失败则 configLoaded=false（保守不执行）。 */
+     *  每次创建自由小窗（initCaptionView）时重新读取——开关修改后重新打开自由小窗即生效，无需重启设备；
+     *  读取成功则更新开关字段；读取失败（如 app 进程被清理/停止导致 provider 不可达）则
+     *  沿用上次成功读取的配置（缓存兜底），避免“清理后台后重开自由小窗”时误回退为全部显示。 */
     private void loadConfig(Object captionView) {
-        boolean loaded = false;
         try {
             Context ctx = (Context) XposedHelpers.getObjectField(captionView, "mContext");
             ContentResolver cr = ctx.getContentResolver();
@@ -62,17 +62,19 @@ public class MainHook implements IXposedHookLoadPackage {
                             hideThreeDot = value == 1;
                         }
                     }
-                    loaded = true;
+                    configLoaded = true;
                     XposedBridge.log(TAG + " config -> hideBottomBar=" + hideBottomBar
                             + " hideThreeDot=" + hideThreeDot);
                 } finally {
                     c.close();
                 }
+            } else {
+                XposedBridge.log(TAG + " loadConfig: provider cursor null, keep cached config");
             }
         } catch (Throwable t) {
-            XposedBridge.log(TAG + " loadConfig error, keep previous: " + t.getMessage());
+            XposedBridge.log(TAG + " loadConfig error, keep cached config: " + t.getMessage());
         }
-        configLoaded = loaded;
+        // 读取失败：不重置 configLoaded，沿用上次成功读取的开关状态
     }
 
     private void hookSystemServer(XC_LoadPackage.LoadPackageParam lpparam) {
