@@ -90,8 +90,8 @@ public class MainHook implements IXposedHookLoadPackage {
                             try {
                                 Object thisObj = param.thisObject;
                                 loadConfig(thisObj);
-                                // 配置未读取成功：不执行任何隐藏（保守），下次自由小窗创建时重试
-                                if (!configLoaded) return;
+                                // 配置读取失败（如重启后模块app未启动）时，使用默认值 true（都隐藏），
+                                // 避免重启后白条和菜单栏默认显示，需要手动重新开关才生效的问题
 
                                 // ---- 隐藏底部手势小横条（开关：hide_bottom_bar） ----
                                 if (hideBottomBar) {
@@ -150,8 +150,8 @@ public class MainHook implements IXposedHookLoadPackage {
                         @Override
                         protected void beforeHookedMethod(MethodHookParam param) {
                             try {
-                                // 直接用最近一次 initCaptionView 读取的开关状态（避免每次触摸都跨进程读配置）
-                                if (!configLoaded || !hideThreeDot) return; // 配置未读取成功或开关关闭：不做触摸区域挖空
+                                // 直接用开关状态（配置读取失败时使用默认值 true）
+                                if (!hideThreeDot) return; // 开关关闭：不做触摸区域挖空
 
                                 Region region = (Region) param.args[0];
                                 if (region == null) return;
@@ -191,8 +191,8 @@ public class MainHook implements IXposedHookLoadPackage {
                         @Override
                         protected void beforeHookedMethod(MethodHookParam param) {
                             try {
-                                // 直接用最近一次 initCaptionView 读取的开关状态（避免每次触摸都跨进程读配置）
-                                if (!configLoaded || !hideThreeDot) return; // 配置未读取成功或开关关闭：不做点击拦截
+                                // 直接用开关状态（配置读取失败时使用默认值 true）
+                                if (!hideThreeDot) return; // 开关关闭：不做点击拦截
 
                                 Object thisObj = param.thisObject;
                                 Object regionMgr = XposedHelpers.getObjectField(thisObj, "mFlexibleCaptionViewRegionMgr");
