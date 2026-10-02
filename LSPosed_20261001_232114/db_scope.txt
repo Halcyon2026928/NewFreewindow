@@ -1,0 +1,67 @@
+>>>>> Dumping cursor [app_pkg_name, module_pkg_name, user_id]
+0 {
+   app_pkg_name=com.ss.android.ugc.aweme
+   module_pkg_name=com.yuexin.panel
+   user_id=0
+}
+1 {
+   app_pkg_name=com.kmxs.reader
+   module_pkg_name=Hook.JiuWu.Xp
+   user_id=0
+}
+2 {
+   app_pkg_name=com.tencent.mm
+   module_pkg_name=dev.ujhhgtg.wekit
+   user_id=0
+}
+3 {
+   app_pkg_name=com.android.systemui
+   module_pkg_name=com.littlewhale.combinedstatus
+   user_id=0
+}
+4 {
+   app_pkg_name=com.ktls.fileinfo
+   module_pkg_name=com.wengui.hook
+   user_id=0
+}
+5 {
+   app_pkg_name=com.kmxs.reader
+   module_pkg_name=com.wengui.hook
+   user_id=0
+}
+6 {
+   app_pkg_name=com.coolapk.market
+   module_pkg_name=com.wengui.hook
+   user_id=0
+}
+7 {
+   app_pkg_name=system
+   module_pkg_name=me.siowu.OplusKeyHook
+   user_id=0
+}
+8 {
+   app_pkg_name=com.intsig.camscanner
+   module_pkg_name=com.wengui.hook
+   user_id=0
+}
+9 {
+   app_pkg_name=system
+   module_pkg_name=io.github.kxob.backgesturefix
+   user_id=0
+}
+10 {
+   app_pkg_name=com.android.launcher
+   module_pkg_name=io.github.kxob.backgesturefix
+   user_id=0
+}
+11 {
+   app_pkg_name=com.android.systemui
+   module_pkg_name=io.github.kxob.backgesturefix
+   user_id=0
+}
+12 {
+   app_pkg_name=system
+   module_pkg_name=io.github.halcyon2026928.freewindow
+   user_id=0
+}
+<<<<<

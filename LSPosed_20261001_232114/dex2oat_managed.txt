@@ -1,0 +1,146 @@
+>>>>> Dumping cursor [pkg, apk_path, odex_path, odex_mtime]
+0 {
+   pkg=com.yuexin.panel
+   apk_path=/data/app/~~x85mcZDU9Njh16i3Q-kh9Q==/com.yuexin.panel--gNu5BA_zlfeGezViVXxwg==/base.apk
+   odex_path=/data/app/~~x85mcZDU9Njh16i3Q-kh9Q==/com.yuexin.panel--gNu5BA_zlfeGezViVXxwg==/oat/arm64/base.odex
+   odex_mtime=1789459448598
+}
+1 {
+   pkg=com.coolapk.market
+   apk_path=/data/app/~~-o6mp4TYd2d0B_9re_Qg0A==/com.coolapk.market-zMb4oKqlN3lYKErcnT4ygg==/base.apk
+   odex_path=/data/app/~~-o6mp4TYd2d0B_9re_Qg0A==/com.coolapk.market-zMb4oKqlN3lYKErcnT4ygg==/oat/arm64/base.odex
+   odex_mtime=1789462104951
+}
+2 {
+   pkg=com.coolapk.market
+   apk_path=/data/app/~~wYdW6D03qB5mP-gfF0ePEA==/com.coolapk.market-p9KkkEMG_4Tcb-_FOn9fWg==/base.apk
+   odex_path=/data/app/~~wYdW6D03qB5mP-gfF0ePEA==/com.coolapk.market-p9KkkEMG_4Tcb-_FOn9fWg==/oat/arm64/base.odex
+   odex_mtime=1789462126895
+}
+3 {
+   pkg=com.kmxs.reader
+   apk_path=/data/app/~~xhjbA8BkIYt7VsM7iAPv9g==/com.kmxs.reader-MQjp2UJMr_7pDvO0MHxm-Q==/base.apk
+   odex_path=/data/app/~~xhjbA8BkIYt7VsM7iAPv9g==/com.kmxs.reader-MQjp2UJMr_7pDvO0MHxm-Q==/oat/arm64/base.odex
+   odex_mtime=1789464111896
+}
+4 {
+   pkg=com.ss.android.ugc.aweme
+   apk_path=/data/app/~~Fd9SwnoMBfTBODATuxSsEw==/com.ss.android.ugc.aweme-7CKWMkxqYdpOqVQEksMQiw==/base.apk
+   odex_path=/data/app/~~Fd9SwnoMBfTBODATuxSsEw==/com.ss.android.ugc.aweme-7CKWMkxqYdpOqVQEksMQiw==/oat/arm64/base.odex
+   odex_mtime=1789479046037
+}
+5 {
+   pkg=com.yuexin.panel
+   apk_path=/data/app/~~_WmZ9JbTIoE4phgWaWhshw==/com.yuexin.panel-PcKaFtMWO9RECufIJFz_AA==/base.apk
+   odex_path=/data/app/~~_WmZ9JbTIoE4phgWaWhshw==/com.yuexin.panel-PcKaFtMWO9RECufIJFz_AA==/oat/arm64/base.odex
+   odex_mtime=1789547555112
+}
+6 {
+   pkg=com.yuexin.panel
+   apk_path=/data/app/~~q_tOZd8ZGcVap_fSfb_64g==/com.yuexin.panel-U747C8FUrCcwTAsrCYn_9A==/base.apk
+   odex_path=/data/app/~~q_tOZd8ZGcVap_fSfb_64g==/com.yuexin.panel-U747C8FUrCcwTAsrCYn_9A==/oat/arm64/base.odex
+   odex_mtime=1789603571481
+}
+7 {
+   pkg=com.tencent.mm
+   apk_path=/data/app/~~6GMHRM8mvoP-myqpoyqYtg==/com.tencent.mm--TCfwpS4bBh1yfSv2yzihg==/base.apk
+   odex_path=/data/app/~~6GMHRM8mvoP-myqpoyqYtg==/com.tencent.mm--TCfwpS4bBh1yfSv2yzihg==/oat/arm64/base.odex
+   odex_mtime=1789655389063
+}
+8 {
+   pkg=com.google.android.webview
+   apk_path=/product/app/WebViewGoogle64CN/WebViewGoogle64CN.apk
+   odex_path=/data/dalvik-cache/arm/product@app@WebViewGoogle64CN@WebViewGoogle64CN.apk@classes.dex
+   odex_mtime=1789655398359
+}
+9 {
+   pkg=com.coloros.shortcuts
+   apk_path=/data/app/~~aQE0TGw1HQPhYHU9Psma_g==/com.coloros.shortcuts-FZp_lhcLEs_rhJoVrxhqOQ==/base.apk
+   odex_path=/data/app/~~aQE0TGw1HQPhYHU9Psma_g==/com.coloros.shortcuts-FZp_lhcLEs_rhJoVrxhqOQ==/oat/arm64/base.odex
+   odex_mtime=1789824682576
+}
+10 {
+   pkg=com.android.server.telecom
+   apk_path=/system_ext/priv-app/Telecom/Telecom.apk
+   odex_path=/data/dalvik-cache/arm64/system_ext@priv-app@Telecom@Telecom.apk@classes.dex
+   odex_mtime=1789824744216
+}
+11 {
+   pkg=com.android.launcher
+   apk_path=/system_ext/priv-app/OplusLauncher/OplusLauncher.apk
+   odex_path=/data/dalvik-cache/arm64/system_ext@priv-app@OplusLauncher@OplusLauncher.apk@classes.dex
+   odex_mtime=1789824824264
+}
+12 {
+   pkg=com.oplus.athena
+   apk_path=/system_ext/app/Athena/Athena.apk
+   odex_path=/data/dalvik-cache/arm64/system_ext@app@Athena@Athena.apk@classes.dex
+   odex_mtime=1789824825296
+}
+13 {
+   pkg=com.kmxs.reader
+   apk_path=/data/app/~~vSDig94zLVm-CZSrQfj9Wg==/com.kmxs.reader-5mWJvcd5UXTRHvxdcQyABw==/base.apk
+   odex_path=/data/app/~~vSDig94zLVm-CZSrQfj9Wg==/com.kmxs.reader-5mWJvcd5UXTRHvxdcQyABw==/oat/arm64/base.odex
+   odex_mtime=1789824835440
+}
+14 {
+   pkg=me.siowu.OplusKeyHook
+   apk_path=/data/app/~~p1s_exlUjtT9N9OmbfAHSw==/me.siowu.OplusKeyHook-5If6Q2R5ndIpz-2rstfEwQ==/base.apk
+   odex_path=/data/app/~~p1s_exlUjtT9N9OmbfAHSw==/me.siowu.OplusKeyHook-5If6Q2R5ndIpz-2rstfEwQ==/oat/arm64/base.odex
+   odex_mtime=1790083119434
+}
+15 {
+   pkg=com.yuexin.panel
+   apk_path=/data/app/~~B9mdtq9KU8YnKpUv8y_Emw==/com.yuexin.panel-gnD4c_Ezjjt34Yr2rqFqIw==/base.apk
+   odex_path=/data/app/~~B9mdtq9KU8YnKpUv8y_Emw==/com.yuexin.panel-gnD4c_Ezjjt34Yr2rqFqIw==/oat/arm64/base.odex
+   odex_mtime=1790223529714
+}
+16 {
+   pkg=com.intsig.camscanner
+   apk_path=/data/app/~~mO-mFZuERvuN0QzC6RaqqQ==/com.intsig.camscanner-qVMNes-N_Fzcr90xaE_a6Q==/base.apk
+   odex_path=/data/app/~~mO-mFZuERvuN0QzC6RaqqQ==/com.intsig.camscanner-qVMNes-N_Fzcr90xaE_a6Q==/oat/arm64/base.odex
+   odex_mtime=1790425478524
+}
+17 {
+   pkg=com.eg.android.AlipayGphone
+   apk_path=/data/app/~~cpxpk45UwAv0wxmXr5gY5w==/com.eg.android.AlipayGphone-YLNorcAlonMcuMPFLcRsxw==/base.apk
+   odex_path=/data/app/~~cpxpk45UwAv0wxmXr5gY5w==/com.eg.android.AlipayGphone-YLNorcAlonMcuMPFLcRsxw==/oat/arm64/base.odex
+   odex_mtime=1790512682920
+}
+18 {
+   pkg=com.alibaba.android.rimet
+   apk_path=/data/app/~~Lxu493lPNUBRPJbMZXM5PA==/com.alibaba.android.rimet-SQndCQpqcj63FGoSrr3eRA==/base.apk
+   odex_path=/data/app/~~Lxu493lPNUBRPJbMZXM5PA==/com.alibaba.android.rimet-SQndCQpqcj63FGoSrr3eRA==/oat/arm64/base.odex
+   odex_mtime=1790512748068
+}
+19 {
+   pkg=com.coolapk.market
+   apk_path=/data/app/~~bEdtqbhSY40soRHIy6SCoQ==/com.coolapk.market-sAMtNmk5WSppQ6dzJHG10Q==/base.apk
+   odex_path=/data/app/~~bEdtqbhSY40soRHIy6SCoQ==/com.coolapk.market-sAMtNmk5WSppQ6dzJHG10Q==/oat/arm64/base.odex
+   odex_mtime=1790592246851
+}
+20 {
+   pkg=com.coolapk.market
+   apk_path=/data/app/~~s0JAjTh2nSk2Q6C0zkza8Q==/com.coolapk.market-IFyoIzAinKl-hGvu1e_QLQ==/base.apk
+   odex_path=/data/app/~~s0JAjTh2nSk2Q6C0zkza8Q==/com.coolapk.market-IFyoIzAinKl-hGvu1e_QLQ==/oat/arm64/base.odex
+   odex_mtime=1790680507997
+}
+21 {
+   pkg=com.kmxs.reader
+   apk_path=/data/app/~~etmSoQQvCjezyz8NeSoLYQ==/com.kmxs.reader-kx-pZ0axsN5hSYzqpJAzgA==/base.apk
+   odex_path=/data/app/~~etmSoQQvCjezyz8NeSoLYQ==/com.kmxs.reader-kx-pZ0axsN5hSYzqpJAzgA==/oat/arm64/base.odex
+   odex_mtime=1790860360734
+}
+22 {
+   pkg=com.ss.android.ugc.aweme
+   apk_path=/data/app/~~-lq-3f1cICKzkClNuWkm7Q==/com.ss.android.ugc.aweme-RtUVPgul6p7dDbR78X14HQ==/base.apk
+   odex_path=/data/app/~~-lq-3f1cICKzkClNuWkm7Q==/com.ss.android.ugc.aweme-RtUVPgul6p7dDbR78X14HQ==/oat/arm64/base.odex
+   odex_mtime=1790860443750
+}
+23 {
+   pkg=com.ktls.fileinfo
+   apk_path=/data/app/~~gBtp08-R3_ioA85U3AnWJg==/com.ktls.fileinfo-3V8HQ38quo3n3sgW9zE8WQ==/base.apk
+   odex_path=/data/app/~~gBtp08-R3_ioA85U3AnWJg==/com.ktls.fileinfo-3V8HQ38quo3n3sgW9zE8WQ==/oat/arm64/base.odex
+   odex_mtime=1790860463950
+}
+<<<<<

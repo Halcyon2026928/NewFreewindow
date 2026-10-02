@@ -139,6 +139,11 @@ public class MainHook implements IXposedHookLoadPackage {
      * hook FlexibleCaptionView.updateTouchableRegion(Region)：
      * 每次标题栏把触摸区域应用到 Surface 前，把三点按钮触摸区域挖空，
      * 使该位置触摸穿透到自由小窗中的应用。
+     *
+     * 注意：ColorOS16 上 mHandleButtonRegion 不是三点按钮的小区域，
+     * 而是整个标题栏拖动区域（如 [243,-52][1029,142]，宽786高194），
+     * 直接挖空会导致小窗无法拖动。因此当区域过大时，
+     * 只挖空右上角三点按钮附近的小区域（64x64），保留拖动条。
      */
     private void hookTouchThroughCarve(Class<?> captionViewClass) {
         try {
@@ -150,8 +155,7 @@ public class MainHook implements IXposedHookLoadPackage {
                         @Override
                         protected void beforeHookedMethod(MethodHookParam param) {
                             try {
-                                // 直接用开关状态（配置读取失败时使用默认值 true）
-                                if (!hideThreeDot) return; // 开关关闭：不做触摸区域挖空
+                                if (!hideThreeDot) return;
 
                                 Region region = (Region) param.args[0];
                                 if (region == null) return;
@@ -162,9 +166,26 @@ public class MainHook implements IXposedHookLoadPackage {
                                 Rect btn = (Rect) XposedHelpers.getObjectField(regionMgr, "mHandleButtonRegion");
                                 if (btn == null || btn.isEmpty()) return;
 
-                                region.op(btn.left, btn.top, btn.right, btn.bottom, Region.Op.DIFFERENCE);
-                                XposedBridge.log(TAG + " carved three-dot touch region for touch-through: "
-                                        + btn.toShortString());
+                                int w = btn.width();
+                                int h = btn.height();
+                                // ColorOS17: mHandleButtonRegion 是三点按钮小区域（通常 < 100x100）
+                                // ColorOS16: mHandleButtonRegion 是整个标题栏拖动区域（宽 > 200）
+                                if (w > 200 || h > 120) {
+                                    // 只挖空右上角三点按钮附近的小区域（64x64），保留拖动条
+                                    int carveSize = 64;
+                                    int carveLeft = btn.right - carveSize;
+                                    int carveTop = btn.top;
+                                    int carveRight = btn.right;
+                                    int carveBottom = Math.min(btn.top + carveSize, btn.bottom);
+                                    region.op(carveLeft, carveTop, carveRight, carveBottom, Region.Op.DIFFERENCE);
+                                    XposedBridge.log(TAG + " carved small three-dot region (ColorOS16 compat): ["
+                                            + carveLeft + "," + carveTop + "][" + carveRight + "," + carveBottom + "]"
+                                            + " (original mHandleButtonRegion=" + btn.toShortString() + ")");
+                                } else {
+                                    region.op(btn.left, btn.top, btn.right, btn.bottom, Region.Op.DIFFERENCE);
+                                    XposedBridge.log(TAG + " carved three-dot touch region for touch-through: "
+                                            + btn.toShortString());
+                                }
                             } catch (Throwable t) {
                                 XposedBridge.log(TAG + " updateTouchableRegion carve error: " + t.getMessage());
                             }

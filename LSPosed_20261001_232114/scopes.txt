@@ -1,0 +1,375 @@
+com.ss.android.ugc.aweme:sandboxed_process2/10414
+	com.yuexin.panel
+		com.yuexin.panel.hook.MainHook
+com.ss.android.ugc.aweme:sandboxed_process3/10414
+	com.yuexin.panel
+		com.yuexin.panel.hook.MainHook
+com.coolapk.market:pushservice/10381
+	com.wengui.hook
+		com.wengui.hook.HookEntry
+com.ss.android.ugc.aweme:sandboxed_process4/10414
+	com.yuexin.panel
+		com.yuexin.panel.hook.MainHook
+com.intsig.camscanner:engine/10335
+	com.wengui.hook
+		com.wengui.hook.HookEntry
+com.ss.android.ugc.aweme:sandboxed_process5/10414
+	com.yuexin.panel
+		com.yuexin.panel.hook.MainHook
+com.ss.android.ugc.aweme:minigame204/10414
+	com.yuexin.panel
+		com.yuexin.panel.hook.MainHook
+com.tencent.mm:xweb_sandboxed_process_ex_1/10383
+	dev.ujhhgtg.wekit
+		dev.ujhhgtg.wekit.loader.entry.lxp.LxpHookEntry
+com.tencent.mm:xweb_sandboxed_process_ex_0/10383
+	dev.ujhhgtg.wekit
+		dev.ujhhgtg.wekit.loader.entry.lxp.LxpHookEntry
+com.ss.android.ugc.aweme:sandboxed_process0/10414
+	com.yuexin.panel
+		com.yuexin.panel.hook.MainHook
+com.ss.android.ugc.aweme:minigame205/10414
+	com.yuexin.panel
+		com.yuexin.panel.hook.MainHook
+com.ss.android.ugc.aweme:sandboxed_process1/10414
+	com.yuexin.panel
+		com.yuexin.panel.hook.MainHook
+com.tencent.mm/10383
+	dev.ujhhgtg.wekit
+		dev.ujhhgtg.wekit.loader.entry.lxp.LxpHookEntry
+com.tencent.mm:xweb_sandboxed_process_ex_2/10383
+	dev.ujhhgtg.wekit
+		dev.ujhhgtg.wekit.loader.entry.lxp.LxpHookEntry
+com.coolapk.market:xg_vip_service/10381
+	com.wengui.hook
+		com.wengui.hook.HookEntry
+com.ss.android.ugc.aweme:depths_disable_art_image_process/10414
+	com.yuexin.panel
+		com.yuexin.panel.hook.MainHook
+me.siowu.OplusKeyHook/10338
+	me.siowu.OplusKeyHook
+		me.siowu.OplusKeyHook.MainHook
+com.ss.android.ugc.aweme:miniapp0/10414
+	com.yuexin.panel
+		com.yuexin.panel.hook.MainHook
+com.ss.android.ugc.aweme:sandboxed_process10/10414
+	com.yuexin.panel
+		com.yuexin.panel.hook.MainHook
+com.ss.android.ugc.aweme:uploadLogProcess/10414
+	com.yuexin.panel
+		com.yuexin.panel.hook.MainHook
+com.ss.android.ugc.aweme:downloader/10414
+	com.yuexin.panel
+		com.yuexin.panel.hook.MainHook
+com.intsig.camscanner:ocr_engine/10335
+	com.wengui.hook
+		com.wengui.hook.HookEntry
+com.ss.android.ugc.aweme:sandboxed_process6/10414
+	com.yuexin.panel
+		com.yuexin.panel.hook.MainHook
+com.ss.android.ugc.aweme:sandboxed_process7/10414
+	com.yuexin.panel
+		com.yuexin.panel.hook.MainHook
+com.ss.android.ugc.aweme:sync/10414
+	com.yuexin.panel
+		com.yuexin.panel.hook.MainHook
+com.ss.android.ugc.aweme:sandboxed_process8/10414
+	com.yuexin.panel
+		com.yuexin.panel.hook.MainHook
+com.ss.android.ugc.aweme:sandboxed_process9/10414
+	com.yuexin.panel
+		com.yuexin.panel.hook.MainHook
+com.ss.android.ugc.aweme:miniapp100/10414
+	com.yuexin.panel
+		com.yuexin.panel.hook.MainHook
+com.coolapk.market:u_heap/10381
+	com.wengui.hook
+		com.wengui.hook.HookEntry
+com.tencent.mm:patch/10383
+	dev.ujhhgtg.wekit
+		dev.ujhhgtg.wekit.loader.entry.lxp.LxpHookEntry
+com.ss.android.ugc.aweme/10414
+	com.yuexin.panel
+		com.yuexin.panel.hook.MainHook
+com.ss.android.ugc.aweme:miniappX/10414
+	com.yuexin.panel
+		com.yuexin.panel.hook.MainHook
+com.ss.android.ugc.aweme:live_broadcast/10414
+	com.yuexin.panel
+		com.yuexin.panel.hook.MainHook
+com.ss.android.ugc.aweme:plugin1/10414
+	com.yuexin.panel
+		com.yuexin.panel.hook.MainHook
+com.tencent.mm:support/10383
+	dev.ujhhgtg.wekit
+		dev.ujhhgtg.wekit.loader.entry.lxp.LxpHookEntry
+com.tencent.mm:br/10383
+	dev.ujhhgtg.wekit
+		dev.ujhhgtg.wekit.loader.entry.lxp.LxpHookEntry
+com.intsig.camscanner:batch_engine/10335
+	com.wengui.hook
+		com.wengui.hook.HookEntry
+com.tencent.mm:xweb_privileged_process_0/10383
+	dev.ujhhgtg.wekit
+		dev.ujhhgtg.wekit.loader.entry.lxp.LxpHookEntry
+com.intsig.camscanner:push/10335
+	com.wengui.hook
+		com.wengui.hook.HookEntry
+com.coolapk.market:bytelive/10381
+	com.wengui.hook
+		com.wengui.hook.HookEntry
+com.tencent.mm:dexopt/10383
+	dev.ujhhgtg.wekit
+		dev.ujhhgtg.wekit.loader.entry.lxp.LxpHookEntry
+com.kmxs.reader:filedownloader/10403
+	com.wengui.hook
+		com.wengui.hook.HookEntry
+com.tencent.mm:push/10383
+	dev.ujhhgtg.wekit
+		dev.ujhhgtg.wekit.loader.entry.lxp.LxpHookEntry
+com.ss.android.ugc.aweme:gamedock/10414
+	com.yuexin.panel
+		com.yuexin.panel.hook.MainHook
+com.tencent.mm:backtrace__/10383
+	dev.ujhhgtg.wekit
+		dev.ujhhgtg.wekit.loader.entry.lxp.LxpHookEntry
+com.tencent.mm:pay/10383
+	dev.ujhhgtg.wekit
+		dev.ujhhgtg.wekit.loader.entry.lxp.LxpHookEntry
+com.ss.android.ugc.aweme:diskclean/10414
+	com.yuexin.panel
+		com.yuexin.panel.hook.MainHook
+com.intsig.camscanner:pushservice/10335
+	com.wengui.hook
+		com.wengui.hook.HookEntry
+com.intsig.camscanner:downloader/10335
+	com.wengui.hook
+		com.wengui.hook.HookEntry
+com.coolapk.market:push/10381
+	com.wengui.hook
+		com.wengui.hook.HookEntry
+com.tencent.mm:tools/10383
+	dev.ujhhgtg.wekit
+		dev.ujhhgtg.wekit.loader.entry.lxp.LxpHookEntry
+com.ktls.fileinfo:crash/10330
+	com.wengui.hook
+		com.wengui.hook.HookEntry
+com.kmxs.reader:downloader/10403
+	com.wengui.hook
+		com.wengui.hook.HookEntry
+com.tencent.mm:sandbox/10383
+	dev.ujhhgtg.wekit
+		dev.ujhhgtg.wekit.loader.entry.lxp.LxpHookEntry
+com.ss.android.ugc.aweme:pushservice/10414
+	com.yuexin.panel
+		com.yuexin.panel.hook.MainHook
+com.tencent.mm:opengl_detector/10383
+	dev.ujhhgtg.wekit
+		dev.ujhhgtg.wekit.loader.entry.lxp.LxpHookEntry
+com.tencent.mm:nospace/10383
+	dev.ujhhgtg.wekit
+		dev.ujhhgtg.wekit.loader.entry.lxp.LxpHookEntry
+io.github.halcyon2026928.freewindow/10356
+	io.github.halcyon2026928.freewindow
+		io.github.halcyon2026928.freewindow.MainHook
+com.ss.android.ugc.aweme:hamlet_scx0/10414
+	com.yuexin.panel
+		com.yuexin.panel.hook.MainHook
+com.kmxs.reader:kssdk_remote/10403
+	com.wengui.hook
+		com.wengui.hook.HookEntry
+com.kmxs.reader:pushservice/10403
+	com.wengui.hook
+		com.wengui.hook.HookEntry
+com.kmxs.reader:ad/10403
+	com.wengui.hook
+		com.wengui.hook.HookEntry
+com.coolapk.market:kssdk_remote/10381
+	com.wengui.hook
+		com.wengui.hook.HookEntry
+com.ss.android.ugc.aweme:ttplayer/10414
+	com.yuexin.panel
+		com.yuexin.panel.hook.MainHook
+com.ss.android.ugc.aweme:safemode_track/10414
+	com.yuexin.panel
+		com.yuexin.panel.hook.MainHook
+com.coolapk.market/10381
+	com.wengui.hook
+		com.wengui.hook.HookEntry
+com.coolapk.market:downloader/10381
+	com.wengui.hook
+		com.wengui.hook.HookEntry
+com.ss.android.ugc.aweme:push/10414
+	com.yuexin.panel
+		com.yuexin.panel.hook.MainHook
+com.tencent.mm:switch/10383
+	dev.ujhhgtg.wekit
+		dev.ujhhgtg.wekit.loader.entry.lxp.LxpHookEntry
+com.kmxs.reader:heap_analysis/10403
+	com.wengui.hook
+		com.wengui.hook.HookEntry
+com.tencent.mm:recovery/10383
+	dev.ujhhgtg.wekit
+		dev.ujhhgtg.wekit.loader.entry.lxp.LxpHookEntry
+com.tencent.mm:isolated_process2/10383
+	dev.ujhhgtg.wekit
+		dev.ujhhgtg.wekit.loader.entry.lxp.LxpHookEntry
+com.ss.android.ugc.aweme:bm/10414
+	com.yuexin.panel
+		com.yuexin.panel.hook.MainHook
+com.ss.android.ugc.aweme:scx1/10414
+	com.yuexin.panel
+		com.yuexin.panel.hook.MainHook
+com.kmxs.reader:bytelive/10403
+	com.wengui.hook
+		com.wengui.hook.HookEntry
+com.ss.android.ugc.aweme:scx0/10414
+	com.yuexin.panel
+		com.yuexin.panel.hook.MainHook
+com.tencent.mm:appbrand3/10383
+	dev.ujhhgtg.wekit
+		dev.ujhhgtg.wekit.loader.entry.lxp.LxpHookEntry
+com.tencent.mm:appbrand2/10383
+	dev.ujhhgtg.wekit
+		dev.ujhhgtg.wekit.loader.entry.lxp.LxpHookEntry
+com.tencent.mm:appbrand4/10383
+	dev.ujhhgtg.wekit
+		dev.ujhhgtg.wekit.loader.entry.lxp.LxpHookEntry
+com.kmxs.reader:media/10403
+	com.wengui.hook
+		com.wengui.hook.HookEntry
+com.ss.android.ugc.aweme:privileged_process4/10414
+	com.yuexin.panel
+		com.yuexin.panel.hook.MainHook
+com.ss.android.ugc.aweme:privileged_process3/10414
+	com.yuexin.panel
+		com.yuexin.panel.hook.MainHook
+com.intsig.camscanner/10335
+	com.wengui.hook
+		com.wengui.hook.HookEntry
+com.ss.android.ugc.aweme:game_dock_gecko/10414
+	com.yuexin.panel
+		com.yuexin.panel.hook.MainHook
+com.intsig.camscanner:bytelive/10335
+	com.wengui.hook
+		com.wengui.hook.HookEntry
+com.ss.android.ugc.aweme:light_observe/10414
+	com.yuexin.panel
+		com.yuexin.panel.hook.MainHook
+com.tencent.mm:TMAssistantDownloadSDKService/10383
+	dev.ujhhgtg.wekit
+		dev.ujhhgtg.wekit.loader.entry.lxp.LxpHookEntry
+com.kmxs.reader:push/10403
+	com.wengui.hook
+		com.wengui.hook.HookEntry
+com.tencent.mm:appbrand1/10383
+	dev.ujhhgtg.wekit
+		dev.ujhhgtg.wekit.loader.entry.lxp.LxpHookEntry
+com.tencent.mm:appbrand0/10383
+	dev.ujhhgtg.wekit
+		dev.ujhhgtg.wekit.loader.entry.lxp.LxpHookEntry
+com.ss.android.ugc.aweme:minigame100/10414
+	com.yuexin.panel
+		com.yuexin.panel.hook.MainHook
+com.tencent.mm:res_can_worker/10383
+	dev.ujhhgtg.wekit
+		dev.ujhhgtg.wekit.loader.entry.lxp.LxpHookEntry
+com.tencent.mm:exdevice/10383
+	dev.ujhhgtg.wekit
+		dev.ujhhgtg.wekit.loader.entry.lxp.LxpHookEntry
+com.ss.android.ugc.aweme:wallpaper/10414
+	com.yuexin.panel
+		com.yuexin.panel.hook.MainHook
+com.ss.android.ugc.aweme:privileged_process0/10414
+	com.yuexin.panel
+		com.yuexin.panel.hook.MainHook
+com.ss.android.ugc.aweme:privileged_process2/10414
+	com.yuexin.panel
+		com.yuexin.panel.hook.MainHook
+com.ss.android.ugc.aweme:privileged_process1/10414
+	com.yuexin.panel
+		com.yuexin.panel.hook.MainHook
+com.tencent.mm:killprocesshelper/10383
+	dev.ujhhgtg.wekit
+		dev.ujhhgtg.wekit.loader.entry.lxp.LxpHookEntry
+com.kmxs.reader/10403
+	com.wengui.hook
+		com.wengui.hook.HookEntry
+com.ktls.fileinfo/10330
+	com.wengui.hook
+		com.wengui.hook.HookEntry
+com.ss.android.ugc.aweme:push_jump_disable_art_image_process/10414
+	com.yuexin.panel
+		com.yuexin.panel.hook.MainHook
+com.tencent.mm:hotpot../10383
+	dev.ujhhgtg.wekit
+		dev.ujhhgtg.wekit.loader.entry.lxp.LxpHookEntry
+com.kmxs.reader:channel/10403
+	com.wengui.hook
+		com.wengui.hook.HookEntry
+com.tencent.mm:recovery3/10383
+	dev.ujhhgtg.wekit
+		dev.ujhhgtg.wekit.loader.entry.lxp.LxpHookEntry
+com.ss.android.ugc.aweme:safemode_restart_process/10414
+	com.yuexin.panel
+		com.yuexin.panel.hook.MainHook
+com.tencent.mm:fallback/10383
+	dev.ujhhgtg.wekit
+		dev.ujhhgtg.wekit.loader.entry.lxp.LxpHookEntry
+com.ss.android.ugc.aweme:phoenix/10414
+	com.yuexin.panel
+		com.yuexin.panel.hook.MainHook
+com.kmxs.reader:dexopt/10403
+	com.wengui.hook
+		com.wengui.hook.HookEntry
+com.tencent.mm:cuploader/10383
+	dev.ujhhgtg.wekit
+		dev.ujhhgtg.wekit.loader.entry.lxp.LxpHookEntry
+com.ss.android.ugc.aweme:gamedock_p1/10414
+	com.yuexin.panel
+		com.yuexin.panel.hook.MainHook
+com.ss.android.ugc.aweme:gamedock_p2/10414
+	com.yuexin.panel
+		com.yuexin.panel.hook.MainHook
+com.ss.android.ugc.aweme:gamedock_p3/10414
+	com.yuexin.panel
+		com.yuexin.panel.hook.MainHook
+com.ss.android.ugc.aweme:gamedock_p4/10414
+	com.yuexin.panel
+		com.yuexin.panel.hook.MainHook
+com.ss.android.ugc.aweme:minigame2/10414
+	com.yuexin.panel
+		com.yuexin.panel.hook.MainHook
+com.ss.android.ugc.aweme:minigame1/10414
+	com.yuexin.panel
+		com.yuexin.panel.hook.MainHook
+com.yuexin.panel/10453
+	com.yuexin.panel
+		com.yuexin.panel.hook.MainHook
+com.ss.android.ugc.aweme:minigame4/10414
+	com.yuexin.panel
+		com.yuexin.panel.hook.MainHook
+com.ss.android.ugc.aweme:minigame3/10414
+	com.yuexin.panel
+		com.yuexin.panel.hook.MainHook
+com.ss.android.ugc.aweme:minigame6/10414
+	com.yuexin.panel
+		com.yuexin.panel.hook.MainHook
+com.ss.android.ugc.aweme:smp/10414
+	com.yuexin.panel
+		com.yuexin.panel.hook.MainHook
+com.ss.android.ugc.aweme:minigame5/10414
+	com.yuexin.panel
+		com.yuexin.panel.hook.MainHook
+com.ss.android.ugc.aweme:minigame7/10414
+	com.yuexin.panel
+		com.yuexin.panel.hook.MainHook
+com.tencent.mm:jectl/10383
+	dev.ujhhgtg.wekit
+		dev.ujhhgtg.wekit.loader.entry.lxp.LxpHookEntry
+com.ss.android.ugc.aweme:minigame0/10414
+	com.yuexin.panel
+		com.yuexin.panel.hook.MainHook
+com.ss.android.ugc.aweme:widgetProvider/10414
+	com.yuexin.panel
+		com.yuexin.panel.hook.MainHook
