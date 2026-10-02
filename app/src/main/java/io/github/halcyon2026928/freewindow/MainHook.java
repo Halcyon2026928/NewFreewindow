@@ -57,6 +57,8 @@ public class MainHook implements IXposedHookLoadPackage {
     private static FrameLayout sDockContainer;
     /** 坞窗中的应用列表。 */
     private static final List<Object> sDockApps = new ArrayList<>();
+    /** 坞窗是否正在显示。 */
+    private static boolean sDockShowing = false;
 
     @Override
     public void handleLoadPackage(XC_LoadPackage.LoadPackageParam lpparam) {
@@ -491,11 +493,15 @@ public class MainHook implements IXposedHookLoadPackage {
                         @Override
                         protected void beforeHookedMethod(MethodHookParam param) {
                             try {
+                                // 坞窗正在显示时，拦截悬浮球点击，不做任何操作
+                                if (sDockShowing) {
+                                    param.setResult(null);
+                                    return;
+                                }
                                 Object floatHandleView = param.thisObject;
                                 Object floatHandleInfo = param.args[0];
                                 String reason = (String) param.args[1];
                                 XposedBridge.log(TAG + " float handle clicked, reason=" + reason);
-                                // 阻止默认恢复自由小窗
                                 param.setResult(null);
                                 sCurrentFloatHandleView = floatHandleView;
                                 showFloatDock(floatHandleView, floatHandleInfo, cl);
@@ -676,6 +682,7 @@ public class MainHook implements IXposedHookLoadPackage {
 
             wm.addView(container, windowParams);
             sDockContainer = container;
+            sDockShowing = true;
 
             // 滑入动画
             dock.setTranslationX(side == 1 ? dockWidth : -dockWidth);
@@ -852,38 +859,26 @@ public class MainHook implements IXposedHookLoadPackage {
             }
             sDockContainer = null;
         }
+        sDockShowing = false;
         // 恢复悬浮球显示
         if (sClassLoader != null) {
             hideAllFloatHandles(sClassLoader, 1f);
         }
     }
 
-    /** 隐藏/显示所有悬浮球（alpha=0 时同时 hide，阻止点击；alpha=1 时 show）。 */
+    /** 隐藏/显示所有悬浮球（用官方 FloatManager.hideFloatHandleView/showFloatHandleView）。 */
     private void hideAllFloatHandles(ClassLoader cl, float alpha) {
         try {
             Object fhc = XposedHelpers.callStaticMethod(
                     XposedHelpers.findClass("com.android.server.wm.FloatHandleController", cl), "getInstance");
-            Object infoList = XposedHelpers.getObjectField(fhc, "mFloatHandleInfoList");
-            if (infoList instanceof List) {
-                for (Object info : (List<?>) infoList) {
-                    try {
-                        Object task = XposedHelpers.getObjectField(info, "task");
-                        if (task != null) {
-                            Object sc = XposedHelpers.callMethod(task, "getSurfaceControl");
-                            if (sc != null) {
-                                Object tx = XposedHelpers.newInstance(
-                                        XposedHelpers.findClass("android.view.SurfaceControl$Transaction", cl));
-                                XposedHelpers.callMethod(tx, "setAlpha", sc, alpha);
-                                if (alpha == 0f) {
-                                    XposedHelpers.callMethod(tx, "hide", sc);
-                                } else {
-                                    XposedHelpers.callMethod(tx, "show", sc);
-                                }
-                                XposedHelpers.callMethod(tx, "apply");
-                            }
-                        }
-                    } catch (Throwable ignored) {
-                    }
+            Object floatManager = XposedHelpers.getObjectField(fhc, "mFloatManager");
+            if (floatManager != null) {
+                if (alpha == 0f) {
+                    XposedHelpers.callMethod(floatManager, "hideFloatHandleView");
+                    XposedBridge.log(TAG + " hideAllFloatHandles: called hideFloatHandleView");
+                } else {
+                    XposedHelpers.callMethod(floatManager, "showFloatHandleView");
+                    XposedBridge.log(TAG + " hideAllFloatHandles: called showFloatHandleView");
                 }
             }
         } catch (Throwable t) {
