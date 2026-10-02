@@ -561,7 +561,7 @@ public class MainHook implements IXposedHookLoadPackage {
             dock.setBackground(dockBg);
 
             int dockWidth = screenWidth * 4 / 9;
-            int dockHeight = screenHeight - dpToPx(ctx, 80); // 上下各留空间
+            int dockHeight = screenHeight - dpToPx(ctx, 100); // 上下各留50dp
             FrameLayout.LayoutParams dockParams = new FrameLayout.LayoutParams(dockWidth, dockHeight);
             dockParams.gravity = Gravity.CENTER_VERTICAL | (side == 1 ? Gravity.END : Gravity.START);
             container.addView(dock, dockParams);
@@ -858,7 +858,7 @@ public class MainHook implements IXposedHookLoadPackage {
         }
     }
 
-    /** 隐藏/显示所有悬浮球（用 setAlpha，保留圆角）。 */
+    /** 隐藏/显示所有悬浮球（alpha=0 时同时 hide，阻止点击；alpha=1 时 show）。 */
     private void hideAllFloatHandles(ClassLoader cl, float alpha) {
         try {
             Object fhc = XposedHelpers.callStaticMethod(
@@ -874,6 +874,11 @@ public class MainHook implements IXposedHookLoadPackage {
                                 Object tx = XposedHelpers.newInstance(
                                         XposedHelpers.findClass("android.view.SurfaceControl$Transaction", cl));
                                 XposedHelpers.callMethod(tx, "setAlpha", sc, alpha);
+                                if (alpha == 0f) {
+                                    XposedHelpers.callMethod(tx, "hide", sc);
+                                } else {
+                                    XposedHelpers.callMethod(tx, "show", sc);
+                                }
                                 XposedHelpers.callMethod(tx, "apply");
                             }
                         }
