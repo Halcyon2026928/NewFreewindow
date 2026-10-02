@@ -805,15 +805,17 @@ public class MainHook implements IXposedHookLoadPackage {
         XposedBridge.log(TAG + " showAppMenu called, pkg=" + pkgName);
         removeAppMenu();
 
+        final int menuWidth = dpToPx(ctx, 120);
+        final int itemHeight = dpToPx(ctx, 44);
+
         // 菜单容器
         LinearLayout menuContainer = new LinearLayout(ctx);
         menuContainer.setOrientation(LinearLayout.VERTICAL);
         GradientDrawable menuBg = new GradientDrawable();
         menuBg.setColor(0xFFFFFFFF);
-        menuBg.setCornerRadius(dpToPx(ctx, 16));
+        menuBg.setCornerRadius(dpToPx(ctx, 12));
         menuContainer.setBackground(menuBg);
-        menuContainer.setPadding(0, dpToPx(ctx, 6), 0, dpToPx(ctx, 6));
-        menuContainer.setElevation(dpToPx(ctx, 16));
+        menuContainer.setElevation(dpToPx(ctx, 8));
 
         // 菜单项
         String[] items = {"取消运行", "取消静音", "关闭"};
@@ -824,19 +826,18 @@ public class MainHook implements IXposedHookLoadPackage {
                 View divider = new View(ctx);
                 divider.setBackgroundColor(0x14000000);
                 LinearLayout.LayoutParams dividerParams = new LinearLayout.LayoutParams(
-                        LinearLayout.LayoutParams.MATCH_PARENT, 1);
+                        menuWidth - dpToPx(ctx, 28), 1);
                 dividerParams.leftMargin = dpToPx(ctx, 14);
-                dividerParams.rightMargin = dpToPx(ctx, 14);
                 menuContainer.addView(divider, dividerParams);
             }
             TextView itemTv = new TextView(ctx);
             itemTv.setText(item);
-            itemTv.setTextSize(15);
+            itemTv.setTextSize(14);
             itemTv.setTextColor(0xFF222222);
             itemTv.setGravity(Gravity.CENTER_VERTICAL);
-            itemTv.setPadding(dpToPx(ctx, 18), dpToPx(ctx, 13), dpToPx(ctx, 28), dpToPx(ctx, 13));
+            itemTv.setPadding(dpToPx(ctx, 16), 0, dpToPx(ctx, 16), 0);
             itemTv.setClickable(true);
-            itemTv.setWidth(dpToPx(ctx, 38));
+            LinearLayout.LayoutParams itemParams = new LinearLayout.LayoutParams(menuWidth, itemHeight);
             itemTv.setOnClickListener(new View.OnClickListener() {
                 @Override
                 public void onClick(View v) {
@@ -848,17 +849,14 @@ public class MainHook implements IXposedHookLoadPackage {
                     }
                 }
             });
-            menuContainer.addView(itemTv);
+            menuContainer.addView(itemTv, itemParams);
         }
 
         // 用 PopupWindow 自动锚定在 anchor 下方
         android.widget.PopupWindow popup = new android.widget.PopupWindow(
-                menuContainer,
-                android.view.ViewGroup.LayoutParams.WRAP_CONTENT,
-                android.view.ViewGroup.LayoutParams.WRAP_CONTENT,
-                true);
+                menuContainer, menuWidth, android.view.ViewGroup.LayoutParams.WRAP_CONTENT, true);
         popup.setOutsideTouchable(true);
-        popup.setElevation(dpToPx(ctx, 16));
+        popup.setElevation(dpToPx(ctx, 8));
         popup.setBackgroundDrawable(new android.graphics.drawable.ColorDrawable(android.graphics.Color.TRANSPARENT));
         popup.setOnDismissListener(new android.widget.PopupWindow.OnDismissListener() {
             @Override
@@ -867,9 +865,8 @@ public class MainHook implements IXposedHookLoadPackage {
             }
         });
         sAppMenuPopup = popup;
-        // showAsDropDown(anchor, xOffset, yOffset)：向左偏移40dp，向下偏移4dp
-        popup.showAsDropDown(anchor, -dpToPx(ctx, 40), dpToPx(ctx, 4));
-        XposedBridge.log(TAG + " showAppMenu popup shown as drop down");
+        popup.showAsDropDown(anchor, -dpToPx(ctx, 30), dpToPx(ctx, 2));
+        XposedBridge.log(TAG + " showAppMenu popup shown");
     }
 
     /** 移除弹出菜单。 */
