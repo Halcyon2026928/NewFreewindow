@@ -2,15 +2,29 @@ package io.github.halcyon2026928.freewindow;
 
 import android.content.ContentResolver;
 import android.content.Context;
+import android.content.pm.ApplicationInfo;
+import android.content.pm.PackageManager;
 import android.database.Cursor;
+import android.graphics.PixelFormat;
 import android.graphics.Rect;
 import android.graphics.Region;
+import android.graphics.drawable.GradientDrawable;
+import android.os.Build;
+import android.util.TypedValue;
+import android.view.Gravity;
 import android.view.MotionEvent;
 import android.view.View;
 import android.view.ViewGroup;
+import android.view.WindowManager;
+import android.widget.FrameLayout;
 import android.widget.ImageView;
+import android.widget.LinearLayout;
+import android.widget.ScrollView;
+import android.widget.TextView;
 
 import java.lang.reflect.Field;
+import java.util.ArrayList;
+import java.util.List;
 
 import de.robv.android.xposed.IXposedHookLoadPackage;
 import de.robv.android.xposed.XC_MethodHook;
@@ -35,9 +49,19 @@ public class MainHook implements IXposedHookLoadPackage {
     private boolean hideThreeDot = true;
     private boolean configLoaded = false;
 
+    /** 系统框架 ClassLoader。 */
+    private static ClassLoader sClassLoader;
+    /** 当前点击的悬浮球 View。 */
+    private static Object sCurrentFloatHandleView;
+    /** 坞窗容器（全局唯一）。 */
+    private static FrameLayout sDockContainer;
+    /** 坞窗中的应用列表。 */
+    private static final List<Object> sDockApps = new ArrayList<>();
+
     @Override
     public void handleLoadPackage(XC_LoadPackage.LoadPackageParam lpparam) {
         if ("android".equals(lpparam.packageName)) {
+            sClassLoader = lpparam.classLoader;
             hookSystemServer(lpparam);
         }
     }
@@ -130,6 +154,9 @@ public class MainHook implements IXposedHookLoadPackage {
 
             // 第三层：让触摸穿透应用（开关：hide_three_dot_menu）
             hookTouchThroughCarve(captionViewClass);
+
+            // 第四层：点击悬浮球弹出坞窗
+            hookFloatHandleClick(lpparam.classLoader);
         } catch (Throwable t) {
             XposedBridge.log(TAG + " hook FlexibleTaskCaptionView failed: " + t.getMessage());
         }
@@ -446,5 +473,422 @@ public class MainHook implements IXposedHookLoadPackage {
             ViewGroup g = (ViewGroup) v;
             for (int i = 0; i < g.getChildCount(); i++) dumpViewTree(g.getChildAt(i), depth + 1);
         }
+    }
+
+    // ==================== 悬浮球坞窗 ====================
+
+    /**
+     * hook FloatHandleView.startFlexibleFreeformFromHandleView(FloatHandleInfo, String)：
+     * 拦截点击悬浮球的默认行为（恢复自由小窗），改为弹出坞窗。
+     */
+    private void hookFloatHandleClick(final ClassLoader cl) {
+        try {
+            Class<?> fhvClass = XposedHelpers.findClass("com.android.server.wm.floathandle.FloatHandleView", cl);
+            Class<?> fhiClass = XposedHelpers.findClass("com.android.server.wm.floathandle.FloatHandleInfo", cl);
+            XposedHelpers.findAndHookMethod(fhvClass, "startFlexibleFreeformFromHandleView",
+                    fhiClass, String.class,
+                    new XC_MethodHook() {
+                        @Override
+                        protected void beforeHookedMethod(MethodHookParam param) {
+                            try {
+                                Object floatHandleView = param.thisObject;
+                                Object floatHandleInfo = param.args[0];
+                                String reason = (String) param.args[1];
+                                XposedBridge.log(TAG + " float handle clicked, reason=" + reason);
+                                // 阻止默认恢复自由小窗
+                                param.setResult(null);
+                                sCurrentFloatHandleView = floatHandleView;
+                                showFloatDock(floatHandleView, floatHandleInfo, cl);
+                            } catch (Throwable t) {
+                                XposedBridge.log(TAG + " hookFloatHandleClick error: " + t.getMessage());
+                            }
+                        }
+                    });
+            XposedBridge.log(TAG + " FloatHandleView click hook success");
+        } catch (Throwable t) {
+            XposedBridge.log(TAG + " hookFloatHandleClick failed: " + t.getMessage());
+        }
+    }
+
+    /** 显示坞窗：从悬浮球所在侧滑出，展示所有悬浮球应用卡片。 */
+    private void showFloatDock(Object floatHandleView, Object floatHandleInfo, ClassLoader cl) {
+        try {
+            if (sDockContainer != null) {
+                removeFloatDock();
+            }
+
+            // 获取 Context
+            Context ctx = (Context) XposedHelpers.callMethod(floatHandleView, "getContext");
+            if (ctx == null) {
+                XposedBridge.log(TAG + " showFloatDock: context is null");
+                return;
+            }
+
+            // 获取屏幕尺寸
+            WindowManager wm = (WindowManager) ctx.getSystemService(Context.WINDOW_SERVICE);
+            int screenWidth = ctx.getResources().getDisplayMetrics().widthPixels;
+            int screenHeight = ctx.getResources().getDisplayMetrics().heightPixels;
+
+            // 判断悬浮球在左边还是右边
+            int side = 1; // 默认右边
+            try {
+                side = XposedHelpers.getIntField(floatHandleInfo, "side");
+            } catch (Throwable ignored) {
+            }
+            XposedBridge.log(TAG + " showFloatDock side=" + side);
+
+            // 隐藏所有悬浮球（用 setAlpha，不能用 setVisibility 否则丢失圆角）
+            hideAllFloatHandles(cl, 0f);
+
+            // 全屏透明容器
+            final FrameLayout container = new FrameLayout(ctx);
+            container.setLayoutParams(new ViewGroup.LayoutParams(
+                    ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.MATCH_PARENT));
+
+            // 坞窗主体
+            LinearLayout dock = new LinearLayout(ctx);
+            dock.setOrientation(LinearLayout.VERTICAL);
+            GradientDrawable dockBg = new GradientDrawable();
+            dockBg.setColor(0xE5E5E5E5); // #e5e5e5 with alpha
+            int dockCorner = dpToPx(ctx, 20);
+            if (side == 1) {
+                // 右边弹出，左边圆角
+                dockBg.setCornerRadii(new float[]{dockCorner, dockCorner, 0, 0, 0, 0, dockCorner, dockCorner});
+            } else {
+                // 左边弹出，右边圆角
+                dockBg.setCornerRadii(new float[]{0, 0, dockCorner, dockCorner, dockCorner, dockCorner, 0, 0});
+            }
+            dock.setBackground(dockBg);
+
+            int dockWidth = screenWidth * 4 / 9;
+            int dockHeight = screenHeight - dpToPx(ctx, 80); // 上下各留空间
+            FrameLayout.LayoutParams dockParams = new FrameLayout.LayoutParams(dockWidth, dockHeight);
+            dockParams.gravity = Gravity.CENTER_VERTICAL | (side == 1 ? Gravity.END : Gravity.START);
+            container.addView(dock, dockParams);
+
+            // 滚动区域（应用卡片列表）
+            ScrollView scrollView = new ScrollView(ctx);
+            scrollView.setBackgroundColor(0x00000000); // 透明
+            LinearLayout.LayoutParams scrollParams = new LinearLayout.LayoutParams(
+                    LinearLayout.LayoutParams.MATCH_PARENT, 0, 1f);
+            scrollView.setLayoutParams(scrollParams);
+
+            LinearLayout cardList = new LinearLayout(ctx);
+            cardList.setOrientation(LinearLayout.VERTICAL);
+            cardList.setPadding(dpToPx(ctx, 12), dpToPx(ctx, 12), dpToPx(ctx, 12), dpToPx(ctx, 12));
+            scrollView.addView(cardList);
+            dock.addView(scrollView);
+
+            // 清除按钮
+            TextView clearBtn = new TextView(ctx);
+            clearBtn.setText("清除");
+            clearBtn.setTextColor(0xFF000000);
+            clearBtn.setTextSize(15);
+            clearBtn.setGravity(Gravity.CENTER);
+            GradientDrawable clearBg = new GradientDrawable();
+            clearBg.setColor(0xFFF3F3F3);
+            clearBg.setCornerRadius(dpToPx(ctx, 24));
+            clearBtn.setBackground(clearBg);
+            LinearLayout.LayoutParams clearParams = new LinearLayout.LayoutParams(
+                    dockWidth - dpToPx(ctx, 60), dpToPx(ctx, 48));
+            clearParams.gravity = Gravity.CENTER_HORIZONTAL;
+            clearParams.bottomMargin = dpToPx(ctx, 25);
+            clearParams.topMargin = dpToPx(ctx, 5);
+            dock.addView(clearBtn, clearParams);
+
+            // 获取所有悬浮球应用
+            sDockApps.clear();
+            try {
+                Object fhc = XposedHelpers.callStaticMethod(
+                        XposedHelpers.findClass("com.android.server.wm.FloatHandleController", cl), "getInstance");
+                Object infoList = XposedHelpers.getObjectField(fhc, "mFloatHandleInfoList");
+                if (infoList instanceof List) {
+                    for (Object info : (List<?>) infoList) {
+                        sDockApps.add(info);
+                    }
+                }
+            } catch (Throwable t) {
+                XposedBridge.log(TAG + " get float handle list error: " + t.getMessage());
+            }
+
+            XposedBridge.log(TAG + " dock apps count=" + sDockApps.size());
+
+            // 添加应用卡片
+            for (Object info : sDockApps) {
+                try {
+                    addAppCard(ctx, cardList, info, cl);
+                } catch (Throwable t) {
+                    XposedBridge.log(TAG + " add app card error: " + t.getMessage());
+                }
+            }
+
+            // 清除按钮点击
+            final ClassLoader finalCl = cl;
+            clearBtn.setOnClickListener(new View.OnClickListener() {
+                @Override
+                public void onClick(View v) {
+                    try {
+                        clearAllDockApps(finalCl);
+                        removeFloatDock();
+                    } catch (Throwable t) {
+                        XposedBridge.log(TAG + " clear all error: " + t.getMessage());
+                    }
+                }
+            });
+
+            // 点击坞窗外收回，点击坞窗内不拦截
+            final LinearLayout finalDock = dock;
+            container.setOnTouchListener(new View.OnTouchListener() {
+                @Override
+                public boolean onTouch(View v, MotionEvent event) {
+                    if (event.getAction() == MotionEvent.ACTION_DOWN) {
+                        int[] loc = new int[2];
+                        finalDock.getLocationOnScreen(loc);
+                        float x = event.getRawX();
+                        float y = event.getRawY();
+                        boolean insideDock = x >= loc[0] && x <= loc[0] + finalDock.getWidth()
+                                && y >= loc[1] && y <= loc[1] + finalDock.getHeight();
+                        if (!insideDock) {
+                            removeFloatDock();
+                            return true;
+                        }
+                    }
+                    return false;
+                }
+            });
+
+            // 窗口参数
+            WindowManager.LayoutParams windowParams = new WindowManager.LayoutParams(2520); // TYPE_SYSTEM_EDGE_PANEL
+            windowParams.flags = WindowManager.LayoutParams.FLAG_NOT_FOCUSABLE
+                    | WindowManager.LayoutParams.FLAG_LAYOUT_IN_SCREEN
+                    | WindowManager.LayoutParams.FLAG_LAYOUT_NO_LIMITS;
+            try {
+                Field pf = WindowManager.LayoutParams.class.getDeclaredField("privateFlags");
+                pf.setAccessible(true);
+                pf.setInt(windowParams, 16); // PRIVATE_FLAG_TRUSTED_OVERLAY
+            } catch (Throwable ignored) {
+            }
+            windowParams.format = PixelFormat.TRANSLUCENT;
+            windowParams.width = screenWidth;
+            windowParams.height = screenHeight;
+            windowParams.gravity = Gravity.TOP | Gravity.START;
+            windowParams.setTitle("FreeWindowDock");
+
+            wm.addView(container, windowParams);
+            sDockContainer = container;
+
+            // 滑入动画
+            dock.setTranslationX(side == 1 ? dockWidth : -dockWidth);
+            dock.animate().translationX(0).setDuration(250).start();
+
+            XposedBridge.log(TAG + " showed float dock, side=" + side + ", apps=" + sDockApps.size());
+        } catch (Throwable t) {
+            XposedBridge.log(TAG + " showFloatDock error: " + t.getMessage());
+        }
+    }
+
+    /** 添加一个应用卡片到坞窗。 */
+    private void addAppCard(Context ctx, LinearLayout cardList, Object floatHandleInfo, ClassLoader cl) {
+        // 获取包名和任务信息（FloatHandleInfo 直接有 getPackageName/getUserId 和 taskId 字段）
+        String pkgName = "";
+        int userId = 0;
+        int taskId = -1;
+        try {
+            pkgName = (String) XposedHelpers.callMethod(floatHandleInfo, "getPackageName");
+            userId = (int) XposedHelpers.callMethod(floatHandleInfo, "getUserId");
+            taskId = XposedHelpers.getIntField(floatHandleInfo, "taskId");
+        } catch (Throwable ignored) {
+        }
+        XposedBridge.log(TAG + " addAppCard pkg=" + pkgName + " taskId=" + taskId + " userId=" + userId);
+
+        // 卡片容器（透明背景）
+        LinearLayout card = new LinearLayout(ctx);
+        card.setOrientation(LinearLayout.VERTICAL);
+        LinearLayout.LayoutParams cardParams = new LinearLayout.LayoutParams(
+                LinearLayout.LayoutParams.MATCH_PARENT, LinearLayout.LayoutParams.WRAP_CONTENT);
+        cardParams.bottomMargin = dpToPx(ctx, 10);
+        cardList.addView(card, cardParams);
+
+        // 顶部栏：图标 + 名称 + 三点菜单
+        LinearLayout topBar = new LinearLayout(ctx);
+        topBar.setOrientation(LinearLayout.HORIZONTAL);
+        topBar.setGravity(Gravity.CENTER_VERTICAL);
+        topBar.setPadding(dpToPx(ctx, 10), dpToPx(ctx, 8), dpToPx(ctx, 10), dpToPx(ctx, 8));
+        card.addView(topBar);
+
+        // 应用图标
+        ImageView icon = new ImageView(ctx);
+        int iconSize = dpToPx(ctx, 36);
+        LinearLayout.LayoutParams iconParams = new LinearLayout.LayoutParams(iconSize, iconSize);
+        topBar.addView(icon, iconParams);
+        try {
+            PackageManager pm = ctx.getPackageManager();
+            // getApplicationInfoAsUser 是隐藏API，用反射调用
+            ApplicationInfo appInfo = (ApplicationInfo) XposedHelpers.callMethod(pm,
+                    "getApplicationInfoAsUser", pkgName, 512, userId);
+            icon.setImageDrawable(pm.getApplicationIcon(appInfo));
+        } catch (Throwable t) {
+            XposedBridge.log(TAG + " get icon error: " + t.getMessage());
+        }
+
+        // 应用名称
+        TextView nameTv = new TextView(ctx);
+        nameTv.setTextSize(14);
+        nameTv.setTextColor(0xFF000000);
+        nameTv.setMaxLines(1);
+        LinearLayout.LayoutParams nameParams = new LinearLayout.LayoutParams(0, LinearLayout.LayoutParams.WRAP_CONTENT, 1f);
+        nameParams.leftMargin = dpToPx(ctx, 10);
+        topBar.addView(nameTv, nameParams);
+        try {
+            PackageManager pm = ctx.getPackageManager();
+            ApplicationInfo appInfo = (ApplicationInfo) XposedHelpers.callMethod(pm,
+                    "getApplicationInfoAsUser", pkgName, 512, userId);
+            CharSequence label = pm.getApplicationLabel(appInfo);
+            nameTv.setText(label != null ? label : pkgName);
+        } catch (Throwable t) {
+            nameTv.setText(pkgName.isEmpty() ? "未知" : pkgName);
+        }
+
+        // 三点菜单按钮
+        final TextView menuBtn = new TextView(ctx);
+        menuBtn.setText("⋮");
+        menuBtn.setTextSize(22);
+        menuBtn.setTextColor(0xFF333333);
+        menuBtn.setGravity(Gravity.CENTER);
+        menuBtn.setPadding(dpToPx(ctx, 12), dpToPx(ctx, 4), dpToPx(ctx, 12), dpToPx(ctx, 4));
+        topBar.addView(menuBtn);
+
+        final String finalPkgName = pkgName;
+        final int finalUserId = userId;
+        final int finalTaskId = taskId;
+        final Object finalInfo = floatHandleInfo;
+        final ClassLoader finalCl = cl;
+
+        menuBtn.setOnClickListener(new View.OnClickListener() {
+            @Override
+            public void onClick(View v) {
+                showAppMenu(ctx, menuBtn, finalPkgName, finalUserId, finalTaskId, finalInfo, finalCl);
+            }
+        });
+
+        // 灰色占位区（预览区）
+        View preview = new View(ctx);
+        preview.setBackgroundColor(0xFFD0D0D0);
+        LinearLayout.LayoutParams previewParams = new LinearLayout.LayoutParams(
+                LinearLayout.LayoutParams.MATCH_PARENT, dpToPx(ctx, 200));
+        previewParams.leftMargin = dpToPx(ctx, 10);
+        previewParams.rightMargin = dpToPx(ctx, 10);
+        previewParams.bottomMargin = dpToPx(ctx, 10);
+        card.addView(preview, previewParams);
+    }
+
+    /** 显示单个应用的弹出菜单（取消运行、取消静音、关闭）。 */
+    private void showAppMenu(Context ctx, View anchor, final String pkgName, final int userId,
+                             final int taskId, final Object floatHandleInfo, final ClassLoader cl) {
+        final android.widget.PopupMenu popup = new android.widget.PopupMenu(ctx, anchor);
+        popup.getMenu().add("取消运行");
+        popup.getMenu().add("取消静音");
+        popup.getMenu().add("关闭");
+        popup.setOnMenuItemClickListener(new android.widget.PopupMenu.OnMenuItemClickListener() {
+            @Override
+            public boolean onMenuItemClick(android.view.MenuItem item) {
+                String title = item.getTitle().toString();
+                if ("取消运行".equals(title)) {
+                    removeSingleApp(pkgName, userId, taskId, floatHandleInfo, cl);
+                    removeFloatDock();
+                } else if ("关闭".equals(title)) {
+                    // 只关闭菜单
+                }
+                return true;
+            }
+        });
+        popup.show();
+    }
+
+    /** 清除单个应用：用官方 removeFloatHandle 移除悬浮球 + 杀进程。 */
+    private void removeSingleApp(String pkgName, int userId, int taskId, Object floatHandleInfo, ClassLoader cl) {
+        try {
+            // 官方逻辑：removeFloatHandle(int taskId, null, true, 5)
+            Object fhc = XposedHelpers.callStaticMethod(
+                    XposedHelpers.findClass("com.android.server.wm.FloatHandleController", cl), "getInstance");
+            XposedHelpers.callMethod(fhc, "removeFloatHandle", taskId, null, true, 5);
+            XposedBridge.log(TAG + " official removeFloatHandle taskId=" + taskId);
+            // 杀进程
+            try {
+                Object am = XposedHelpers.callStaticMethod(android.app.ActivityManager.class, "getService");
+                XposedHelpers.callMethod(am, "forceStopPackage", pkgName, userId);
+                XposedBridge.log(TAG + " force stopped " + pkgName);
+            } catch (Throwable t) {
+                XposedBridge.log(TAG + " forceStop error: " + t.getMessage());
+            }
+        } catch (Throwable t) {
+            XposedBridge.log(TAG + " removeSingleApp error: " + t.getMessage());
+        }
+    }
+
+    /** 清除坞窗中所有应用。 */
+    private void clearAllDockApps(ClassLoader cl) {
+        for (Object info : new ArrayList<>(sDockApps)) {
+            try {
+                String pkgName = (String) XposedHelpers.callMethod(info, "getPackageName");
+                int userId = (int) XposedHelpers.callMethod(info, "getUserId");
+                int taskId = XposedHelpers.getIntField(info, "taskId");
+                removeSingleApp(pkgName, userId, taskId, info, cl);
+            } catch (Throwable t) {
+                XposedBridge.log(TAG + " clear app error: " + t.getMessage());
+            }
+        }
+        sDockApps.clear();
+    }
+
+    /** 移除坞窗，恢复悬浮球显示。 */
+    private void removeFloatDock() {
+        if (sDockContainer != null) {
+            try {
+                Context ctx = sDockContainer.getContext();
+                WindowManager wm = (WindowManager) ctx.getSystemService(Context.WINDOW_SERVICE);
+                wm.removeView(sDockContainer);
+            } catch (Throwable ignored) {
+            }
+            sDockContainer = null;
+        }
+        // 恢复悬浮球显示
+        if (sClassLoader != null) {
+            hideAllFloatHandles(sClassLoader, 1f);
+        }
+    }
+
+    /** 隐藏/显示所有悬浮球（用 setAlpha，保留圆角）。 */
+    private void hideAllFloatHandles(ClassLoader cl, float alpha) {
+        try {
+            Object fhc = XposedHelpers.callStaticMethod(
+                    XposedHelpers.findClass("com.android.server.wm.FloatHandleController", cl), "getInstance");
+            Object infoList = XposedHelpers.getObjectField(fhc, "mFloatHandleInfoList");
+            if (infoList instanceof List) {
+                for (Object info : (List<?>) infoList) {
+                    try {
+                        Object task = XposedHelpers.getObjectField(info, "task");
+                        if (task != null) {
+                            Object sc = XposedHelpers.callMethod(task, "getSurfaceControl");
+                            if (sc != null) {
+                                Object tx = XposedHelpers.newInstance(
+                                        XposedHelpers.findClass("android.view.SurfaceControl$Transaction", cl));
+                                XposedHelpers.callMethod(tx, "setAlpha", sc, alpha);
+                                XposedHelpers.callMethod(tx, "apply");
+                            }
+                        }
+                    } catch (Throwable ignored) {
+                    }
+                }
+            }
+        } catch (Throwable t) {
+            XposedBridge.log(TAG + " hideAllFloatHandles error: " + t.getMessage());
+        }
+    }
+
+    /** dp 转 px。 */
+    private int dpToPx(Context ctx, int dp) {
+        return (int) TypedValue.applyDimension(TypedValue.COMPLEX_UNIT_DIP, dp,
+                ctx.getResources().getDisplayMetrics());
     }
 }
