@@ -575,6 +575,7 @@ public class MainHook implements IXposedHookLoadPackage {
             // 滚动区域（应用卡片列表）
             ScrollView scrollView = new ScrollView(ctx);
             scrollView.setBackgroundColor(0x00000000); // 透明
+            scrollView.setNestedScrollingEnabled(false);
             LinearLayout.LayoutParams scrollParams = new LinearLayout.LayoutParams(
                     LinearLayout.LayoutParams.MATCH_PARENT, 0, 1f);
             scrollView.setLayoutParams(scrollParams);
@@ -762,8 +763,11 @@ public class MainHook implements IXposedHookLoadPackage {
         menuBtn.setTextSize(22);
         menuBtn.setTextColor(0xFF333333);
         menuBtn.setGravity(Gravity.CENTER);
-        menuBtn.setPadding(dpToPx(ctx, 12), dpToPx(ctx, 4), dpToPx(ctx, 12), dpToPx(ctx, 4));
-        topBar.addView(menuBtn);
+        menuBtn.setClickable(true);
+        menuBtn.setFocusable(true);
+        LinearLayout.LayoutParams menuParams = new LinearLayout.LayoutParams(
+                dpToPx(ctx, 48), dpToPx(ctx, 48));
+        topBar.addView(menuBtn, menuParams);
 
         final String finalPkgName = pkgName;
         final int finalUserId = userId;
@@ -771,10 +775,15 @@ public class MainHook implements IXposedHookLoadPackage {
         final Object finalInfo = floatHandleInfo;
         final ClassLoader finalCl = cl;
 
-        menuBtn.setOnClickListener(new View.OnClickListener() {
+        menuBtn.setOnTouchListener(new View.OnTouchListener() {
             @Override
-            public void onClick(View v) {
-                showAppMenu(ctx, menuBtn, finalPkgName, finalUserId, finalTaskId, finalInfo, finalCl);
+            public boolean onTouch(View v, MotionEvent event) {
+                XposedBridge.log(TAG + " menuBtn onTouch action=" + event.getAction());
+                if (event.getAction() == MotionEvent.ACTION_UP) {
+                    showAppMenu(ctx, menuBtn, finalPkgName, finalUserId, finalTaskId, finalInfo, finalCl);
+                    return true;
+                }
+                return true;
             }
         });
 
@@ -789,27 +798,89 @@ public class MainHook implements IXposedHookLoadPackage {
         card.addView(preview, previewParams);
     }
 
+    /** 自定义弹出菜单窗口（避免系统 PopupMenu 在 system_server 中全黑）。 */
+    private static View sAppMenuWindow = null;
+
     /** 显示单个应用的弹出菜单（取消运行、取消静音、关闭）。 */
     private void showAppMenu(Context ctx, View anchor, final String pkgName, final int userId,
                              final int taskId, final Object floatHandleInfo, final ClassLoader cl) {
-        final android.widget.PopupMenu popup = new android.widget.PopupMenu(ctx, anchor);
-        popup.getMenu().add("取消运行");
-        popup.getMenu().add("取消静音");
-        popup.getMenu().add("关闭");
-        popup.setOnMenuItemClickListener(new android.widget.PopupMenu.OnMenuItemClickListener() {
-            @Override
-            public boolean onMenuItemClick(android.view.MenuItem item) {
-                String title = item.getTitle().toString();
-                if ("取消运行".equals(title)) {
-                    removeSingleApp(pkgName, userId, taskId, floatHandleInfo, cl);
-                    removeFloatDock();
-                } else if ("关闭".equals(title)) {
-                    // 只关闭菜单
+        XposedBridge.log(TAG + " showAppMenu called, pkg=" + pkgName);
+        // 先移除已有的菜单
+        removeAppMenu();
+
+        final WindowManager wm = (WindowManager) ctx.getSystemService(Context.WINDOW_SERVICE);
+
+        // 菜单容器
+        LinearLayout menuContainer = new LinearLayout(ctx);
+        menuContainer.setOrientation(LinearLayout.VERTICAL);
+        GradientDrawable menuBg = new GradientDrawable();
+        menuBg.setColor(0xFFFFFFFF);
+        menuBg.setCornerRadius(dpToPx(ctx, 8));
+        menuContainer.setBackground(menuBg);
+        menuContainer.setPadding(dpToPx(ctx, 4), dpToPx(ctx, 4), dpToPx(ctx, 4), dpToPx(ctx, 4));
+        menuContainer.setElevation(dpToPx(ctx, 4));
+
+        String[] items = {"取消运行", "取消静音", "关闭"};
+        for (final String item : items) {
+            TextView itemTv = new TextView(ctx);
+            itemTv.setText(item);
+            itemTv.setTextSize(14);
+            itemTv.setTextColor(0xFF000000);
+            itemTv.setGravity(Gravity.CENTER_VERTICAL);
+            itemTv.setPadding(dpToPx(ctx, 16), dpToPx(ctx, 10), dpToPx(ctx, 16), dpToPx(ctx, 10));
+            itemTv.setOnClickListener(new View.OnClickListener() {
+                @Override
+                public void onClick(View v) {
+                    XposedBridge.log(TAG + " menu item clicked: " + item);
+                    removeAppMenu();
+                    if ("取消运行".equals(item)) {
+                        removeSingleApp(pkgName, userId, taskId, floatHandleInfo, cl);
+                        removeFloatDock();
+                    }
+                    // "关闭"只关闭菜单
                 }
-                return true;
+            });
+            menuContainer.addView(itemTv);
+        }
+
+        // 菜单位置：在 anchor 下方
+        int[] anchorLoc = new int[2];
+        anchor.getLocationOnScreen(anchorLoc);
+        int menuWidth = dpToPx(ctx, 120);
+        int menuX = anchorLoc[0] - menuWidth + anchor.getWidth();
+        int menuY = anchorLoc[1] + anchor.getHeight();
+
+        WindowManager.LayoutParams menuParams = new WindowManager.LayoutParams(2520); // TYPE_SYSTEM_EDGE_PANEL
+        menuParams.width = menuWidth;
+        menuParams.height = WindowManager.LayoutParams.WRAP_CONTENT;
+        menuParams.x = menuX;
+        menuParams.y = menuY;
+        menuParams.flags = WindowManager.LayoutParams.FLAG_NOT_FOCUSABLE
+                | WindowManager.LayoutParams.FLAG_LAYOUT_IN_SCREEN
+                | WindowManager.LayoutParams.FLAG_LAYOUT_NO_LIMITS;
+        try {
+            Field pf = WindowManager.LayoutParams.class.getDeclaredField("privateFlags");
+            pf.setAccessible(true);
+            pf.setInt(menuParams, 16); // PRIVATE_FLAG_TRUSTED_OVERLAY
+        } catch (Throwable ignored) {
+        }
+
+        wm.addView(menuContainer, menuParams);
+        sAppMenuWindow = menuContainer;
+        XposedBridge.log(TAG + " showAppMenu custom menu shown at x=" + menuX + " y=" + menuY);
+    }
+
+    /** 移除自定义弹出菜单。 */
+    private void removeAppMenu() {
+        if (sAppMenuWindow != null) {
+            try {
+                Context ctx = sAppMenuWindow.getContext();
+                WindowManager wm = (WindowManager) ctx.getSystemService(Context.WINDOW_SERVICE);
+                wm.removeView(sAppMenuWindow);
+            } catch (Throwable ignored) {
             }
-        });
-        popup.show();
+            sAppMenuWindow = null;
+        }
     }
 
     /** 清除单个应用：用官方 removeFloatHandle 移除悬浮球 + 杀进程。 */
@@ -850,6 +921,7 @@ public class MainHook implements IXposedHookLoadPackage {
 
     /** 移除坞窗，恢复悬浮球显示。 */
     private void removeFloatDock() {
+        removeAppMenu();
         if (sDockContainer != null) {
             try {
                 Context ctx = sDockContainer.getContext();
