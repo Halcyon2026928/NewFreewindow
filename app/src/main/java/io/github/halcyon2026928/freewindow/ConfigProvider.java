@@ -35,6 +35,8 @@ public class ConfigProvider extends ContentProvider {
                 prefs.getBoolean(SettingsActivity.KEY_HIDE_BOTTOM_BAR, true) ? 1 : 0});
         c.addRow(new Object[]{SettingsActivity.KEY_HIDE_THREE_DOT,
                 prefs.getBoolean(SettingsActivity.KEY_HIDE_THREE_DOT, true) ? 1 : 0});
+        c.addRow(new Object[]{SettingsActivity.KEY_ENABLE_DOCK,
+                prefs.getBoolean(SettingsActivity.KEY_ENABLE_DOCK, true) ? 1 : 0});
         return c;
     }
 

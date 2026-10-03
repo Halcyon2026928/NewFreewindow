@@ -11,6 +11,9 @@
     <string name="hide_three_dot_title">隐藏三点菜单栏</string>
     <string name="hide_three_dot_desc">移除顶部三点按钮（视觉、点击、触摸穿透）</string>
 
+    <string name="enable_dock_title">启用坞窗</string>
+    <string name="enable_dock_desc">点击悬浮球弹出坞窗卡片；关闭后按系统默认恢复迷你浮窗</string>
+
     <string name="settings_hint">首次安装需要重启，重启后开关即时生效：重新打开自由小窗即可，无需重启设备</string>
 
     <string name="theme_title">界面主题</string>

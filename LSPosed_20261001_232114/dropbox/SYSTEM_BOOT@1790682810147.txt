@@ -1,8 +1,0 @@
-isPrevious: true
-Build: OnePlus/PLK110/OP60FFL1:16/BP2A.250605.015/B.15d779e_af8764_af8093:user/release-keys
-Hardware: canoe
-Revision: 0
-Bootloader: unknown
-Radio: null
-Kernel: Linux version 6.12.23-android16-5-ga8f88ad96df3-ab13929693-4k (kleaf@build-host) (Android (12833971, +pgo, +bolt, +lto, +mlgo, based on r536225) clang version 19.0.1 (https://android.googlesource.com/toolchain/llvm-project b3a530ec6537146650e42be89f1089e9a3588460), LLD 19.0.1) #1 SMP PREEMPT Wed Aug 13 21:07:19 UTC 2025
-

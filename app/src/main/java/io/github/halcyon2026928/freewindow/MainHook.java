@@ -16,6 +16,7 @@ import android.view.MotionEvent;
 import android.view.View;
 import android.view.ViewGroup;
 import android.view.WindowManager;
+import android.view.animation.PathInterpolator;
 import android.widget.FrameLayout;
 import android.widget.ImageView;
 import android.widget.LinearLayout;
@@ -23,6 +24,7 @@ import android.widget.ScrollView;
 import android.widget.TextView;
 
 import java.lang.reflect.Field;
+import java.lang.reflect.Method;
 import java.util.ArrayList;
 import java.util.List;
 
@@ -39,14 +41,16 @@ public class MainHook implements IXposedHookLoadPackage {
     /** 配置在模块 app 的 SharedPreferences 中（与 SettingsActivity 一致），经 ConfigProvider 暴露。 */
     private static final String KEY_HIDE_BOTTOM_BAR = "hide_bottom_bar";
     private static final String KEY_HIDE_THREE_DOT = "hide_three_dot_menu";
+    private static final String KEY_ENABLE_DOCK = "enable_float_dock";
 
     /** 设为 true 时会把 FlexibleTaskCaptionView 的完整视图树打印到 Xposed 日志，便于在真机上确认三点按钮的确切 id。 */
     private static final boolean DUMP_CAPTION_TREE = false;
 
-    /** 开关状态。首次自由小窗创建时经 ConfigProvider 跨进程读取（Binder/Provider 机制，
-     *  无 SELinux/ROM 写入限制）；修改后重启系统框架，重新打开自由小窗即按新配置生效。 */
+    /** 开关状态。首次自由小窗创建或点击悬浮球时经 ConfigProvider 跨进程读取。
+     *  读取失败则沿用上次成功读取的配置（缓存兜底）。 */
     private boolean hideBottomBar = true;
     private boolean hideThreeDot = true;
+    private boolean enableDock = true;
     private boolean configLoaded = false;
 
     /** 系统框架 ClassLoader。 */
@@ -55,6 +59,12 @@ public class MainHook implements IXposedHookLoadPackage {
     private static Object sCurrentFloatHandleView;
     /** 坞窗容器（全局唯一）。 */
     private static FrameLayout sDockContainer;
+    private static View sDockPanel;
+    private static int sDockSide = 1;
+    private static boolean sDockClosing = false;
+    /** 官方 lively 坞窗滑入滑出：PathInterpolator(0.28, 0.4, 0.2, 1) / 457ms */
+    private static final long DOCK_ANIM_MS = 457L;
+    private static final PathInterpolator DOCK_INTERPOLATOR = new PathInterpolator(0.28f, 0.4f, 0.2f, 1.0f);
     /** 坞窗窗口在屏幕上的偏移（用于计算菜单位置）。 */
     private static int sDockWindowX = 0;
     private static int sDockWindowY = 0;
@@ -74,10 +84,19 @@ public class MainHook implements IXposedHookLoadPackage {
     /** 从模块 app 的 ConfigProvider 读取开关状态。
      *  每次创建自由小窗（initCaptionView）时重新读取——开关修改后重新打开自由小窗即生效，无需重启设备；
      *  读取成功则更新开关字段；读取失败（如 app 进程被清理/停止导致 provider 不可达）则
-     *  沿用上次成功读取的配置（缓存兜底），避免“清理后台后重开自由小窗”时误回退为全部显示。 */
+     *  沿用上次成功读取的配置（缓存兜底）。 */
     private void loadConfig(Object captionView) {
         try {
             Context ctx = (Context) XposedHelpers.getObjectField(captionView, "mContext");
+            loadConfigFromContext(ctx);
+        } catch (Throwable t) {
+            XposedBridge.log(TAG + " loadConfig error, keep cached config: " + t.getMessage());
+        }
+    }
+
+    private void loadConfigFromContext(Context ctx) {
+        if (ctx == null) return;
+        try {
             ContentResolver cr = ctx.getContentResolver();
             Cursor c = cr.query(ConfigProvider.CONFIG_URI, null, null, null, null);
             if (c != null) {
@@ -89,11 +108,14 @@ public class MainHook implements IXposedHookLoadPackage {
                             hideBottomBar = value == 1;
                         } else if (KEY_HIDE_THREE_DOT.equals(key)) {
                             hideThreeDot = value == 1;
+                        } else if (KEY_ENABLE_DOCK.equals(key)) {
+                            enableDock = value == 1;
                         }
                     }
                     configLoaded = true;
                     XposedBridge.log(TAG + " config -> hideBottomBar=" + hideBottomBar
-                            + " hideThreeDot=" + hideThreeDot);
+                            + " hideThreeDot=" + hideThreeDot
+                            + " enableDock=" + enableDock);
                 } finally {
                     c.close();
                 }
@@ -103,7 +125,6 @@ public class MainHook implements IXposedHookLoadPackage {
         } catch (Throwable t) {
             XposedBridge.log(TAG + " loadConfig error, keep cached config: " + t.getMessage());
         }
-        // 读取失败：不重置 configLoaded，沿用上次成功读取的开关状态
     }
 
     private void hookSystemServer(XC_LoadPackage.LoadPackageParam lpparam) {
@@ -119,8 +140,7 @@ public class MainHook implements IXposedHookLoadPackage {
                             try {
                                 Object thisObj = param.thisObject;
                                 loadConfig(thisObj);
-                                // 配置读取失败（如重启后模块app未启动）时，使用默认值 true（都隐藏），
-                                // 避免重启后白条和菜单栏默认显示，需要手动重新开关才生效的问题
+                                // 配置读取失败（如重启后模块app未启动）时，使用默认值 true
 
                                 // ---- 隐藏底部手势小横条（开关：hide_bottom_bar） ----
                                 if (hideBottomBar) {
@@ -162,6 +182,9 @@ public class MainHook implements IXposedHookLoadPackage {
 
             // 第四层：点击悬浮球弹出坞窗
             hookFloatHandleClick(lpparam.classLoader);
+
+            // 第五层：坞窗卡片静态画面（ImageView + TaskSnapshot）
+            LivelyHook.install(lpparam.classLoader);
         } catch (Throwable t) {
             XposedBridge.log(TAG + " hook FlexibleTaskCaptionView failed: " + t.getMessage());
         }
@@ -496,16 +519,25 @@ public class MainHook implements IXposedHookLoadPackage {
                         @Override
                         protected void beforeHookedMethod(MethodHookParam param) {
                             try {
-                                // 坞窗正在显示时，拦截悬浮球点击，不做任何操作
-                                if (sDockShowing) {
-                                    param.setResult(null);
+                                Object floatHandleView = param.thisObject;
+                                try {
+                                    Context ctx = (Context) XposedHelpers.callMethod(floatHandleView, "getContext");
+                                    loadConfigFromContext(ctx);
+                                } catch (Throwable ignored) {
+                                }
+                                if (!enableDock) {
+                                    XposedBridge.log(TAG + " dock disabled, skip intercept");
                                     return;
                                 }
-                                Object floatHandleView = param.thisObject;
+                                // 该方法返回 boolean，setResult(null) 会在拆箱时 NPE 导致 system_server 软重启
+                                if (sDockShowing) {
+                                    param.setResult(false);
+                                    return;
+                                }
                                 Object floatHandleInfo = param.args[0];
                                 String reason = (String) param.args[1];
                                 XposedBridge.log(TAG + " float handle clicked, reason=" + reason);
-                                param.setResult(null);
+                                param.setResult(false);
                                 sCurrentFloatHandleView = floatHandleView;
                                 showFloatDock(floatHandleView, floatHandleInfo, cl);
                             } catch (Throwable t) {
@@ -522,8 +554,11 @@ public class MainHook implements IXposedHookLoadPackage {
     /** 显示坞窗：从悬浮球所在侧滑出，展示所有悬浮球应用卡片。 */
     private void showFloatDock(Object floatHandleView, Object floatHandleInfo, ClassLoader cl) {
         try {
+            if (sDockClosing) {
+                return;
+            }
             if (sDockContainer != null) {
-                removeFloatDock();
+                return;
             }
 
             // 获取 Context
@@ -546,7 +581,6 @@ public class MainHook implements IXposedHookLoadPackage {
             }
             XposedBridge.log(TAG + " showFloatDock side=" + side);
 
-            // 隐藏所有悬浮球（用 setAlpha，不能用 setVisibility 否则丢失圆角）
             hideAllFloatHandles(cl, 0f);
 
             // 全屏透明容器
@@ -686,11 +720,17 @@ public class MainHook implements IXposedHookLoadPackage {
 
             wm.addView(container, windowParams);
             sDockContainer = container;
+            sDockPanel = dock;
+            sDockSide = side;
             sDockShowing = true;
 
-            // 滑入动画
+            // 右侧：从右往左滑出；左侧：从左往右滑出（官方 lively 时长/插值）
             dock.setTranslationX(side == 1 ? dockWidth : -dockWidth);
-            dock.animate().translationX(0).setDuration(250).start();
+            dock.animate()
+                    .translationX(0)
+                    .setDuration(DOCK_ANIM_MS)
+                    .setInterpolator(DOCK_INTERPOLATOR)
+                    .start();
 
             XposedBridge.log(TAG + " showed float dock, side=" + side + ", apps=" + sDockApps.size());
         } catch (Throwable t) {
@@ -785,15 +825,55 @@ public class MainHook implements IXposedHookLoadPackage {
             }
         });
 
-        // 灰色占位区（预览区）
-        View preview = new View(ctx);
-        preview.setBackgroundColor(0xFFD0D0D0);
+        // 预览区：迷你浮窗静态画面（ImageView）
+        ImageView preview = LivelyHook.createPreview(ctx, floatHandleInfo, cl);
         LinearLayout.LayoutParams previewParams = new LinearLayout.LayoutParams(
                 LinearLayout.LayoutParams.MATCH_PARENT, dpToPx(ctx, 200));
         previewParams.leftMargin = dpToPx(ctx, 10);
         previewParams.rightMargin = dpToPx(ctx, 10);
         previewParams.bottomMargin = dpToPx(ctx, 10);
         card.addView(preview, previewParams);
+
+        View.OnClickListener restoreMini = new View.OnClickListener() {
+            @Override
+            public void onClick(View v) {
+                restoreMiniFromCard(finalInfo, finalCl);
+            }
+        };
+        preview.setOnClickListener(restoreMini);
+        card.setOnClickListener(restoreMini);
+    }
+
+    /**
+     * 点击坞窗卡片：关闭坞窗，按官方 startActivityByFloatInfo 恢复为迷你浮窗。
+     */
+    private void restoreMiniFromCard(Object floatHandleInfo, ClassLoader cl) {
+        try {
+            XposedBridge.log(TAG + " restoreMiniFromCard");
+            if (floatHandleInfo == null || cl == null) return;
+            try {
+                XposedHelpers.callMethod(floatHandleInfo, "setFlexibleTaskState", 2);
+            } catch (Throwable ignored) {
+                try {
+                    XposedHelpers.setIntField(floatHandleInfo, "zoomState", 2);
+                } catch (Throwable ignored2) {
+                }
+            }
+            try {
+                int type = XposedHelpers.getIntField(floatHandleInfo, "type");
+                if (type == 0) {
+                    XposedHelpers.setIntField(floatHandleInfo, "type", 3);
+                }
+            } catch (Throwable ignored) {
+            }
+            Object fhc = XposedHelpers.callStaticMethod(
+                    XposedHelpers.findClass("com.android.server.wm.FloatHandleController", cl), "getInstance");
+            removeFloatDock();
+            XposedHelpers.callMethod(fhc, "startActivityByFloatInfo", floatHandleInfo, "lively_panel");
+            XposedBridge.log(TAG + " restoreMiniFromCard startActivityByFloatInfo done");
+        } catch (Throwable t) {
+            XposedBridge.log(TAG + " restoreMiniFromCard error: " + t.getMessage());
+        }
     }
 
     /** 弹出菜单（用 PopupWindow.showAsDropDown 自动锚定位置）。 */
@@ -916,9 +996,45 @@ public class MainHook implements IXposedHookLoadPackage {
         sDockApps.clear();
     }
 
-    /** 移除坞窗，恢复悬浮球显示。 */
+    /** 移除坞窗：右侧从左往右滑入收回，左侧从右往左滑入收回，结束后再显示悬浮球。 */
     private void removeFloatDock() {
+        if (sDockClosing) {
+            return;
+        }
         removeAppMenu();
+        if (sDockContainer == null) {
+            finishRemoveDock();
+            return;
+        }
+        sDockClosing = true;
+        View dock = sDockPanel;
+        if (dock == null && sDockContainer.getChildCount() > 0) {
+            dock = sDockContainer.getChildAt(0);
+        }
+        if (dock == null) {
+            finishRemoveDock();
+            return;
+        }
+        int width = dock.getWidth();
+        if (width <= 0) {
+            width = dock.getLayoutParams() != null ? dock.getLayoutParams().width : 0;
+        }
+        int outX = sDockSide == 1 ? width : -width;
+        dock.animate().cancel();
+        dock.animate()
+                .translationX(outX)
+                .setDuration(DOCK_ANIM_MS)
+                .setInterpolator(DOCK_INTERPOLATOR)
+                .withEndAction(new Runnable() {
+                    @Override
+                    public void run() {
+                        finishRemoveDock();
+                    }
+                })
+                .start();
+    }
+
+    private void finishRemoveDock() {
         if (sDockContainer != null) {
             try {
                 Context ctx = sDockContainer.getContext();
@@ -928,30 +1044,139 @@ public class MainHook implements IXposedHookLoadPackage {
             }
             sDockContainer = null;
         }
+        sDockPanel = null;
         sDockShowing = false;
-        // 恢复悬浮球显示
+        sDockClosing = false;
         if (sClassLoader != null) {
             hideAllFloatHandles(sClassLoader, 1f);
         }
     }
 
-    /** 隐藏/显示所有悬浮球（用官方 FloatManager.hideFloatHandleView/showFloatHandleView）。 */
+    /** 悬浮球走官方 hide/show 动画；显隐只用 alpha，避免 setVisibility 把圆角打成直角。 */
     private void hideAllFloatHandles(ClassLoader cl, float alpha) {
+        boolean hide = alpha == 0f;
+        applyHandleAlpha(sCurrentFloatHandleView, hide);
+        Object fhc = null;
         try {
-            Object fhc = XposedHelpers.callStaticMethod(
+            fhc = XposedHelpers.callStaticMethod(
                     XposedHelpers.findClass("com.android.server.wm.FloatHandleController", cl), "getInstance");
             Object floatManager = XposedHelpers.getObjectField(fhc, "mFloatManager");
             if (floatManager != null) {
-                if (alpha == 0f) {
+                if (hide) {
                     XposedHelpers.callMethod(floatManager, "hideFloatHandleView");
-                    XposedBridge.log(TAG + " hideAllFloatHandles: called hideFloatHandleView");
+                    XposedBridge.log(TAG + " hideAllFloatHandles: hideFloatHandleView");
                 } else {
+                    applyHandleAlpha(XposedHelpers.callMethod(floatManager, "getView"), false);
                     XposedHelpers.callMethod(floatManager, "showFloatHandleView");
-                    XposedBridge.log(TAG + " hideAllFloatHandles: called showFloatHandleView");
+                    XposedBridge.log(TAG + " hideAllFloatHandles: showFloatHandleView");
                 }
             }
         } catch (Throwable t) {
             XposedBridge.log(TAG + " hideAllFloatHandles error: " + t.getMessage());
+        }
+        switchHandleMode(sCurrentFloatHandleView, hide ? 1 : 4);
+        if (!hide) {
+            final Object controller = fhc;
+            restoreHandleCorners(sCurrentFloatHandleView, controller);
+            if (sCurrentFloatHandleView instanceof View) {
+                ((View) sCurrentFloatHandleView).postDelayed(new Runnable() {
+                    @Override
+                    public void run() {
+                        restoreHandleCorners(sCurrentFloatHandleView, controller);
+                    }
+                }, DOCK_ANIM_MS);
+            }
+        }
+    }
+
+    private void applyHandleAlpha(Object handle, final boolean hide) {
+        if (!(handle instanceof View)) return;
+        final View v = (View) handle;
+        Runnable r = new Runnable() {
+            @Override
+            public void run() {
+                try {
+                    XposedHelpers.callMethod(v, "setForceHidden", hide);
+                } catch (Throwable ignored) {
+                }
+                v.setAlpha(hide ? 0f : 1f);
+            }
+        };
+        if (!v.post(r)) {
+            r.run();
+        }
+    }
+
+    private void restoreHandleCorners(Object handle, Object fhc) {
+        if (!(handle instanceof View)) return;
+        final View v = (View) handle;
+        v.post(new Runnable() {
+            @Override
+            public void run() {
+                try {
+                    android.os.IBinder token = v.getWindowToken();
+                    if (token != null && fhc != null) {
+                        XposedHelpers.callMethod(fhc, "resetFloatHandleViewCornersAndShadow", token);
+                    }
+                } catch (Throwable ignored) {
+                }
+                restoreOutline(v);
+                try {
+                    Object container = XposedHelpers.getObjectField(v, "mFloatHandleViewContainer");
+                    if (container instanceof View) {
+                        restoreOutline((View) container);
+                    }
+                } catch (Throwable ignored) {
+                }
+                if (v instanceof ViewGroup) {
+                    ViewGroup g = (ViewGroup) v;
+                    for (int i = 0; i < g.getChildCount(); i++) {
+                        restoreOutline(g.getChildAt(i));
+                    }
+                }
+            }
+        });
+    }
+
+    private void restoreOutline(View v) {
+        if (v == null) return;
+        v.setClipToOutline(true);
+        v.invalidateOutline();
+    }
+
+    private void switchHandleMode(Object handle, int toMode) {
+        if (handle == null) return;
+        try {
+            XposedHelpers.callMethod(handle, "setForceHidden", toMode == 1);
+        } catch (Throwable ignored) {
+        }
+        int fromMode = 4;
+        try {
+            fromMode = XposedHelpers.getIntField(handle, "mCurrentMode");
+        } catch (Throwable ignored) {
+        }
+        Class<?> c = handle.getClass();
+        while (c != null && c != Object.class) {
+            for (Method m : c.getDeclaredMethods()) {
+                if (!"startSwitchModeAnimation".equals(m.getName())) continue;
+                Class<?>[] types = m.getParameterTypes();
+                if (types.length < 2 || types[0] != int.class || types[1] != int.class) continue;
+                try {
+                    m.setAccessible(true);
+                    if (types.length == 2) {
+                        m.invoke(handle, fromMode, toMode);
+                    } else {
+                        Object[] args = new Object[types.length];
+                        args[0] = fromMode;
+                        args[1] = toMode;
+                        m.invoke(handle, args);
+                    }
+                    return;
+                } catch (Throwable t) {
+                    XposedBridge.log(TAG + " startSwitchModeAnimation " + t.getMessage());
+                }
+            }
+            c = c.getSuperclass();
         }
     }
 
