@@ -21,6 +21,7 @@ public class SettingsActivity extends Activity {
     public static final String KEY_HIDE_BOTTOM_BAR = "hide_bottom_bar";
     public static final String KEY_HIDE_THREE_DOT = "hide_three_dot_menu";
     public static final String KEY_ENABLE_DOCK = "enable_float_dock";
+    private static final String KEY_BOOT_STAMP = "boot_stamp";
 
     /** UI 偏好（主题），独立于功能配置 */
     private static final String UI_PREFS = "ui_prefs";
@@ -55,6 +56,7 @@ public class SettingsActivity extends Activity {
         threeDotSwitch = findViewById(R.id.switch_three_dot);
         dockSwitch = findViewById(R.id.switch_dock);
 
+        applyBootDefaults(this);
         syncFromPrefs();
 
         bottomBarSwitch.setOnCheckedChangeListener(new CompoundButton.OnCheckedChangeListener() {
@@ -78,6 +80,27 @@ public class SettingsActivity extends Activity {
                 writePref(KEY_ENABLE_DOCK, isChecked);
             }
         });
+    }
+
+    /**
+     * 每次开机把功能开关恢复为全开（主题不改）。
+     * 用「本次开机时刻」判断是否新开机，关机前全关、开机后也会回到全开。
+     */
+    public static synchronized void applyBootDefaults(Context ctx) {
+        if (ctx == null) return;
+        android.content.SharedPreferences prefs =
+                ctx.getSharedPreferences(PREFS_NAME, Context.MODE_PRIVATE);
+        long bootStamp = System.currentTimeMillis() - android.os.SystemClock.elapsedRealtime();
+        long saved = prefs.getLong(KEY_BOOT_STAMP, 0L);
+        if (Math.abs(bootStamp - saved) <= 60_000L) {
+            return;
+        }
+        prefs.edit()
+                .putBoolean(KEY_HIDE_BOTTOM_BAR, true)
+                .putBoolean(KEY_HIDE_THREE_DOT, true)
+                .putBoolean(KEY_ENABLE_DOCK, true)
+                .putLong(KEY_BOOT_STAMP, bootStamp)
+                .commit();
     }
 
     private void syncFromPrefs() {

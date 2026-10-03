@@ -28,6 +28,7 @@ public class ConfigProvider extends ContentProvider {
     @Override
     public Cursor query(Uri uri, String[] projection, String selection,
                         String[] selectionArgs, String sortOrder) {
+        SettingsActivity.applyBootDefaults(getContext());
         SharedPreferences prefs = getContext()
                 .getSharedPreferences(PREFS_NAME, Context.MODE_PRIVATE);
         MatrixCursor c = new MatrixCursor(new String[]{"key", "value"});

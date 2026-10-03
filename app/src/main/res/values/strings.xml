@@ -14,7 +14,7 @@
     <string name="enable_dock_title">启用坞窗</string>
     <string name="enable_dock_desc">点击悬浮球弹出坞窗卡片；关闭后按系统默认恢复迷你浮窗</string>
 
-    <string name="settings_hint">首次安装需要重启，重启后开关即时生效：重新打开自由小窗即可，无需重启设备</string>
+    <string name="settings_hint">功能开关每次重启手机后会恢复为全部打开；主题会记住你的选择。改开关后重新打开自由小窗即可生效</string>
 
     <string name="theme_title">界面主题</string>
     <string name="theme_desc">开启浅色主题，关闭为深色主题</string>
