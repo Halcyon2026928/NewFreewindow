@@ -1,8 +1,6 @@
 <?xml version="1.0" encoding="utf-8"?>
 <manifest xmlns:android="http://schemas.android.com/apk/res/android">
 
-    <uses-permission android:name="android.permission.RECEIVE_BOOT_COMPLETED" />
-
     <application
         android:allowBackup="false"
         android:icon="@mipmap/ic_launcher"
@@ -20,19 +18,10 @@
             </intent-filter>
         </activity>
 
-        <!-- 配置通道：hook 侧（system_server）经 ContentResolver 跨进程读取开关配置 -->
         <provider
             android:name=".ConfigProvider"
             android:authorities="io.github.halcyon2026928.freewindow.config"
             android:exported="true" />
-
-        <receiver
-            android:name=".BootReceiver"
-            android:exported="true">
-            <intent-filter>
-                <action android:name="android.intent.action.BOOT_COMPLETED" />
-            </intent-filter>
-        </receiver>
 
         <meta-data
             android:name="xposedmodule"
@@ -45,6 +34,10 @@
         <meta-data
             android:name="xposedminversion"
             android:value="82" />
+
+        <meta-data
+            android:name="xposedsharedprefs"
+            android:value="true" />
 
         <meta-data
             android:name="xposedscope"

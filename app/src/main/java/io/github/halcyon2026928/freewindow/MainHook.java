@@ -30,6 +30,7 @@ import java.util.List;
 
 import de.robv.android.xposed.IXposedHookLoadPackage;
 import de.robv.android.xposed.XC_MethodHook;
+import de.robv.android.xposed.XSharedPreferences;
 import de.robv.android.xposed.XposedBridge;
 import de.robv.android.xposed.XposedHelpers;
 import de.robv.android.xposed.callbacks.XC_LoadPackage;
@@ -94,7 +95,9 @@ public class MainHook implements IXposedHookLoadPackage {
         }
     }
 
+    /** 从 LSPosed XSharedPreferences 读取（重启后仍有效），再用 ConfigProvider 覆盖一次以便当场改开关。 */
     private void loadConfigFromContext(Context ctx) {
+        loadFromXSharedPrefs();
         if (ctx == null) return;
         try {
             ContentResolver cr = ctx.getContentResolver();
@@ -113,17 +116,35 @@ public class MainHook implements IXposedHookLoadPackage {
                         }
                     }
                     configLoaded = true;
-                    XposedBridge.log(TAG + " config -> hideBottomBar=" + hideBottomBar
+                    XposedBridge.log(TAG + " config(provider) -> hideBottomBar=" + hideBottomBar
                             + " hideThreeDot=" + hideThreeDot
                             + " enableDock=" + enableDock);
                 } finally {
                     c.close();
                 }
             } else {
-                XposedBridge.log(TAG + " loadConfig: provider cursor null, keep cached config");
+                XposedBridge.log(TAG + " loadConfig: provider cursor null, use XSharedPreferences");
             }
         } catch (Throwable t) {
-            XposedBridge.log(TAG + " loadConfig error, keep cached config: " + t.getMessage());
+            XposedBridge.log(TAG + " loadConfig provider fail, use XSharedPreferences: " + t.getMessage());
+        }
+    }
+
+    private void loadFromXSharedPrefs() {
+        try {
+            XSharedPreferences prefs = new XSharedPreferences(ModulePrefs.PKG, ModulePrefs.NAME);
+            prefs.makeWorldReadable();
+            prefs.reload();
+            hideBottomBar = prefs.getBoolean(KEY_HIDE_BOTTOM_BAR, true);
+            hideThreeDot = prefs.getBoolean(KEY_HIDE_THREE_DOT, true);
+            enableDock = prefs.getBoolean(KEY_ENABLE_DOCK, true);
+            configLoaded = true;
+            XposedBridge.log(TAG + " config(xprefs readable=" + prefs.getFile().canRead()
+                    + ") -> hideBottomBar=" + hideBottomBar
+                    + " hideThreeDot=" + hideThreeDot
+                    + " enableDock=" + enableDock);
+        } catch (Throwable t) {
+            XposedBridge.log(TAG + " XSharedPreferences error: " + t.getMessage());
         }
     }
 
