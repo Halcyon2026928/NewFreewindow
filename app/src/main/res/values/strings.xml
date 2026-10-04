@@ -16,6 +16,6 @@
 
     <string name="settings_hint">开关会记住你的选择，重启手机后保持上次状态。改开关后重新打开自由小窗即可生效</string>
 
-    <string name="theme_title">界面主题</string>
-    <string name="theme_desc">开启浅色主题，关闭为深色主题</string>
+    <string name="theme_to_dark">深色</string>
+    <string name="theme_to_light">浅色</string>
 </resources>

@@ -7,4 +7,5 @@
     <attr name="fwTextPrimary" format="reference" />
     <attr name="fwTextSecondary" format="reference" />
     <attr name="fwTextHint" format="reference" />
+    <attr name="fwThemeChipBackground" format="reference" />
 </resources>

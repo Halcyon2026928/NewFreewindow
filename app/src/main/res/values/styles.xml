@@ -11,6 +11,7 @@
         <item name="fwTextPrimary">@color/text_primary</item>
         <item name="fwTextSecondary">@color/text_secondary</item>
         <item name="fwTextHint">@color/text_hint</item>
+        <item name="fwThemeChipBackground">@drawable/bg_theme_chip</item>
     </style>
 
     <style name="LightTheme" parent="android:style/Theme.Material.Light.NoActionBar">
@@ -24,5 +25,6 @@
         <item name="fwTextPrimary">@color/light_text_primary</item>
         <item name="fwTextSecondary">@color/light_text_secondary</item>
         <item name="fwTextHint">@color/light_text_hint</item>
+        <item name="fwThemeChipBackground">@drawable/bg_theme_chip_light</item>
     </style>
 </resources>

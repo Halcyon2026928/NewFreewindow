@@ -3,7 +3,9 @@ package io.github.halcyon2026928.freewindow;
 import android.app.Activity;
 import android.content.Context;
 import android.os.Bundle;
+import android.view.View;
 import android.widget.CompoundButton;
+import android.widget.ImageView;
 import android.widget.Switch;
 
 /**
@@ -28,16 +30,18 @@ public class SettingsActivity extends Activity {
     @Override
     protected void onCreate(Bundle savedInstanceState) {
         super.onCreate(savedInstanceState);
-        setTheme(isLightTheme() ? R.style.LightTheme : R.style.AppTheme);
+        final boolean light = isLightTheme();
+        setTheme(light ? R.style.LightTheme : R.style.AppTheme);
         setContentView(R.layout.activity_settings);
 
-        Switch themeSwitch = findViewById(R.id.switch_theme);
-        themeSwitch.setChecked(isLightTheme());
-        themeSwitch.setOnCheckedChangeListener(new CompoundButton.OnCheckedChangeListener() {
+        View btnTheme = findViewById(R.id.btnTheme);
+        ImageView ivThemeIcon = findViewById(R.id.ivThemeIcon);
+        ivThemeIcon.setImageResource(light ? R.drawable.ic_theme_sun : R.drawable.ic_theme_moon);
+        btnTheme.setOnClickListener(new View.OnClickListener() {
             @Override
-            public void onCheckedChanged(CompoundButton buttonView, boolean isChecked) {
+            public void onClick(View v) {
                 getSharedPreferences(UI_PREFS, Context.MODE_PRIVATE)
-                        .edit().putBoolean(KEY_LIGHT_THEME, isChecked).commit();
+                        .edit().putBoolean(KEY_LIGHT_THEME, !light).commit();
                 recreate();
             }
         });
