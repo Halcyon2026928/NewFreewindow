@@ -211,22 +211,17 @@ public class MainHook implements IXposedHookLoadPackage {
         }
 
         // 第六层：游戏助手 HangUpUtil 后台挂机（最小化进悬浮球后音频继续）
-        try {
-            MirageWindowHook.hook(lpparam.classLoader);
-        } catch (Throwable t) {
-            XposedBridge.log(TAG + " MirageWindowHook failed: " + t.getMessage());
-        }
+        // try {
+        //     MirageWindowHook.hook(lpparam.classLoader);
+        // } catch (Throwable t) {
+        //     XposedBridge.log(TAG + " MirageWindowHook failed: " + t.getMessage());
+        // }
     }
 
     /**
      * hook FlexibleCaptionView.updateTouchableRegion(Region)：
      * 每次标题栏把触摸区域应用到 Surface 前，把三点按钮触摸区域挖空，
      * 使该位置触摸穿透到自由小窗中的应用。
-     *
-     * 注意：ColorOS16 上 mHandleButtonRegion 不是三点按钮的小区域，
-     * 而是整个标题栏拖动区域（如 [243,-52][1029,142]，宽786高194），
-     * 直接挖空会导致小窗无法拖动。因此当区域过大时，
-     * 只挖空右上角三点按钮附近的小区域（64x64），保留拖动条。
      */
     private void hookTouchThroughCarve(Class<?> captionViewClass) {
         try {
@@ -249,27 +244,9 @@ public class MainHook implements IXposedHookLoadPackage {
                                 Rect btn = (Rect) XposedHelpers.getObjectField(regionMgr, "mHandleButtonRegion");
                                 if (btn == null || btn.isEmpty()) return;
 
-                                int w = btn.width();
-                                int h = btn.height();
-                                // ColorOS17: mHandleButtonRegion 是三点按钮小区域（通常 < 100x100）
-                                // ColorOS16: mHandleButtonRegion 是整个标题栏拖动区域（宽 > 200）
-                                if (w > 200 || h > 120) {
-                                    // ColorOS16: mHandleButtonRegion 是整个标题栏区域，
-                                    // 挖空右侧 120px 宽、整个标题栏高度，确保三点按钮位置触摸穿透
-                                    int carveWidth = 120;
-                                    int carveLeft = btn.right - carveWidth;
-                                    int carveTop = btn.top;
-                                    int carveRight = btn.right;
-                                    int carveBottom = btn.bottom;
-                                    region.op(carveLeft, carveTop, carveRight, carveBottom, Region.Op.DIFFERENCE);
-                                    XposedBridge.log(TAG + " carved right region (ColorOS16 compat): ["
-                                            + carveLeft + "," + carveTop + "][" + carveRight + "," + carveBottom + "]"
-                                            + " (original mHandleButtonRegion=" + btn.toShortString() + ")");
-                                } else {
-                                    region.op(btn.left, btn.top, btn.right, btn.bottom, Region.Op.DIFFERENCE);
-                                    XposedBridge.log(TAG + " carved three-dot touch region for touch-through: "
-                                            + btn.toShortString());
-                                }
+                                region.op(btn.left, btn.top, btn.right, btn.bottom, Region.Op.DIFFERENCE);
+                                XposedBridge.log(TAG + " carved three-dot touch region for touch-through: "
+                                        + btn.toShortString());
                             } catch (Throwable t) {
                                 XposedBridge.log(TAG + " updateTouchableRegion carve error: " + t.getMessage());
                             }
@@ -1086,11 +1063,7 @@ public class MainHook implements IXposedHookLoadPackage {
         }
     }
 
-    /**
-     * 悬浮球显隐对齐 FlymeFreeform LivelyDockController：
-     * 坞开 → setForceHidden(true) + hide；坞关 → showFloatHandleView + refreshFloatHandleView。
-     * 仍用 alpha 兜底，避免直接 GONE 把圆角打成直角。
-     */
+    /** 悬浮球走官方 hide/show 动画；显隐只用 alpha，避免 setVisibility 把圆角打成直角。 */
     private void hideAllFloatHandles(ClassLoader cl, float alpha) {
         boolean hide = alpha == 0f;
         applyHandleAlpha(sCurrentFloatHandleView, hide);
@@ -1101,25 +1074,12 @@ public class MainHook implements IXposedHookLoadPackage {
             Object floatManager = XposedHelpers.getObjectField(fhc, "mFloatManager");
             if (floatManager != null) {
                 if (hide) {
-                    try {
-                        XposedHelpers.callMethod(floatManager, "setViewVisible", View.GONE);
-                    } catch (Throwable ignored) {
-                        XposedHelpers.callMethod(floatManager, "hideFloatHandleView");
-                    }
-                    XposedBridge.log(TAG + " hideAllFloatHandles: hide (Flyme path)");
+                    XposedHelpers.callMethod(floatManager, "hideFloatHandleView");
+                    XposedBridge.log(TAG + " hideAllFloatHandles: hideFloatHandleView");
                 } else {
-                    Object view = null;
-                    try {
-                        view = XposedHelpers.callMethod(floatManager, "getView");
-                    } catch (Throwable ignored) {
-                    }
-                    applyHandleAlpha(view != null ? view : sCurrentFloatHandleView, false);
+                    applyHandleAlpha(XposedHelpers.callMethod(floatManager, "getView"), false);
                     XposedHelpers.callMethod(floatManager, "showFloatHandleView");
-                    try {
-                        XposedHelpers.callMethod(floatManager, "refreshFloatHandleView");
-                    } catch (Throwable ignored) {
-                    }
-                    XposedBridge.log(TAG + " hideAllFloatHandles: show+refresh (Flyme path)");
+                    XposedBridge.log(TAG + " hideAllFloatHandles: showFloatHandleView");
                 }
             }
         } catch (Throwable t) {
