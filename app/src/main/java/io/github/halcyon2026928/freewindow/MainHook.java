@@ -209,6 +209,13 @@ public class MainHook implements IXposedHookLoadPackage {
         } catch (Throwable t) {
             XposedBridge.log(TAG + " hook FlexibleTaskCaptionView failed: " + t.getMessage());
         }
+
+        // 第六层：游戏助手 HangUpUtil 后台挂机（最小化进悬浮球后音频继续）
+        try {
+            MirageWindowHook.hook(lpparam.classLoader);
+        } catch (Throwable t) {
+            XposedBridge.log(TAG + " MirageWindowHook failed: " + t.getMessage());
+        }
     }
 
     /**
@@ -247,14 +254,15 @@ public class MainHook implements IXposedHookLoadPackage {
                                 // ColorOS17: mHandleButtonRegion 是三点按钮小区域（通常 < 100x100）
                                 // ColorOS16: mHandleButtonRegion 是整个标题栏拖动区域（宽 > 200）
                                 if (w > 200 || h > 120) {
-                                    // 只挖空右上角三点按钮附近的小区域（64x64），保留拖动条
-                                    int carveSize = 64;
-                                    int carveLeft = btn.right - carveSize;
+                                    // ColorOS16: mHandleButtonRegion 是整个标题栏区域，
+                                    // 挖空右侧 120px 宽、整个标题栏高度，确保三点按钮位置触摸穿透
+                                    int carveWidth = 120;
+                                    int carveLeft = btn.right - carveWidth;
                                     int carveTop = btn.top;
                                     int carveRight = btn.right;
-                                    int carveBottom = Math.min(btn.top + carveSize, btn.bottom);
+                                    int carveBottom = btn.bottom;
                                     region.op(carveLeft, carveTop, carveRight, carveBottom, Region.Op.DIFFERENCE);
-                                    XposedBridge.log(TAG + " carved small three-dot region (ColorOS16 compat): ["
+                                    XposedBridge.log(TAG + " carved right region (ColorOS16 compat): ["
                                             + carveLeft + "," + carveTop + "][" + carveRight + "," + carveBottom + "]"
                                             + " (original mHandleButtonRegion=" + btn.toShortString() + ")");
                                 } else {
@@ -890,6 +898,11 @@ public class MainHook implements IXposedHookLoadPackage {
             Object fhc = XposedHelpers.callStaticMethod(
                     XposedHelpers.findClass("com.android.server.wm.FloatHandleController", cl), "getInstance");
             removeFloatDock();
+            try {
+                int tid = XposedHelpers.getIntField(floatHandleInfo, "taskId");
+                MirageWindowHook.clearHangUp(tid);
+            } catch (Throwable ignored) {
+            }
             XposedHelpers.callMethod(fhc, "startActivityByFloatInfo", floatHandleInfo, "lively_panel");
             XposedBridge.log(TAG + " restoreMiniFromCard startActivityByFloatInfo done");
         } catch (Throwable t) {
@@ -1073,7 +1086,11 @@ public class MainHook implements IXposedHookLoadPackage {
         }
     }
 
-    /** 悬浮球走官方 hide/show 动画；显隐只用 alpha，避免 setVisibility 把圆角打成直角。 */
+    /**
+     * 悬浮球显隐对齐 FlymeFreeform LivelyDockController：
+     * 坞开 → setForceHidden(true) + hide；坞关 → showFloatHandleView + refreshFloatHandleView。
+     * 仍用 alpha 兜底，避免直接 GONE 把圆角打成直角。
+     */
     private void hideAllFloatHandles(ClassLoader cl, float alpha) {
         boolean hide = alpha == 0f;
         applyHandleAlpha(sCurrentFloatHandleView, hide);
@@ -1084,12 +1101,25 @@ public class MainHook implements IXposedHookLoadPackage {
             Object floatManager = XposedHelpers.getObjectField(fhc, "mFloatManager");
             if (floatManager != null) {
                 if (hide) {
-                    XposedHelpers.callMethod(floatManager, "hideFloatHandleView");
-                    XposedBridge.log(TAG + " hideAllFloatHandles: hideFloatHandleView");
+                    try {
+                        XposedHelpers.callMethod(floatManager, "setViewVisible", View.GONE);
+                    } catch (Throwable ignored) {
+                        XposedHelpers.callMethod(floatManager, "hideFloatHandleView");
+                    }
+                    XposedBridge.log(TAG + " hideAllFloatHandles: hide (Flyme path)");
                 } else {
-                    applyHandleAlpha(XposedHelpers.callMethod(floatManager, "getView"), false);
+                    Object view = null;
+                    try {
+                        view = XposedHelpers.callMethod(floatManager, "getView");
+                    } catch (Throwable ignored) {
+                    }
+                    applyHandleAlpha(view != null ? view : sCurrentFloatHandleView, false);
                     XposedHelpers.callMethod(floatManager, "showFloatHandleView");
-                    XposedBridge.log(TAG + " hideAllFloatHandles: showFloatHandleView");
+                    try {
+                        XposedHelpers.callMethod(floatManager, "refreshFloatHandleView");
+                    } catch (Throwable ignored) {
+                    }
+                    XposedBridge.log(TAG + " hideAllFloatHandles: show+refresh (Flyme path)");
                 }
             }
         } catch (Throwable t) {
