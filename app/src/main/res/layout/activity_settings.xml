@@ -15,7 +15,7 @@
         android:paddingTop="6dp"
         android:paddingRight="14dp"
         android:paddingBottom="6dp"
-        android:text="FREE WINDOW · 自由小窗增强"
+        android:text="灵动坞OS · 自由小窗增强"
         android:textColor="@color/text_primary"
         android:textSize="11sp"
         android:letterSpacing="0.12" />
@@ -183,6 +183,46 @@
 
         <Switch
             android:id="@+id/switch_dock"
+            android:layout_width="wrap_content"
+            android:layout_height="wrap_content"
+            android:layout_marginStart="16dp" />
+    </LinearLayout>
+
+    <!-- 卡片 4：贴边保活 -->
+    <LinearLayout
+        android:layout_width="match_parent"
+        android:layout_height="wrap_content"
+        android:layout_marginTop="14dp"
+        android:background="?attr/fwCardBackground"
+        android:gravity="center_vertical"
+        android:orientation="horizontal"
+        android:padding="18dp">
+
+        <LinearLayout
+            android:layout_width="0dp"
+            android:layout_height="wrap_content"
+            android:layout_weight="1"
+            android:orientation="vertical">
+
+            <TextView
+                android:layout_width="wrap_content"
+                android:layout_height="wrap_content"
+                android:text="@string/keep_alive_title"
+                android:textColor="?attr/fwTextPrimary"
+                android:textSize="16sp"
+                android:textStyle="bold" />
+
+            <TextView
+                android:layout_width="wrap_content"
+                android:layout_height="wrap_content"
+                android:layout_marginTop="3dp"
+                android:text="@string/keep_alive_desc"
+                android:textColor="?attr/fwTextSecondary"
+                android:textSize="12sp" />
+        </LinearLayout>
+
+        <Switch
+            android:id="@+id/switch_keep_alive"
             android:layout_width="wrap_content"
             android:layout_height="wrap_content"
             android:layout_marginStart="16dp" />

@@ -29,7 +29,7 @@
 
         <meta-data
             android:name="xposeddescription"
-            android:value="隐藏自由小窗底部白条 / 顶部三点菜单栏，可独立开关，重启设备即可生效" />
+            android:value="隐藏自由小窗底部白条 / 顶部三点菜单栏，支持坞窗与贴边保活，可独立开关，重启设备即可生效" />
 
         <meta-data
             android:name="xposedminversion"

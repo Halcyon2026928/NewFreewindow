@@ -18,6 +18,8 @@ public class SettingsActivity extends Activity {
     public static final String KEY_HIDE_BOTTOM_BAR = "hide_bottom_bar";
     public static final String KEY_HIDE_THREE_DOT = "hide_three_dot_menu";
     public static final String KEY_ENABLE_DOCK = "enable_float_dock";
+    /** 贴边保活开关，与 FloatKeepAliveHook 读取的键一致。 */
+    public static final String KEY_KEEP_ALIVE = FloatKeepAliveHook.KEY_KEEP_ALIVE;
 
     private static final String UI_PREFS = "ui_prefs";
     private static final String KEY_LIGHT_THEME = "light_theme";
@@ -25,6 +27,7 @@ public class SettingsActivity extends Activity {
     private Switch bottomBarSwitch;
     private Switch threeDotSwitch;
     private Switch dockSwitch;
+    private Switch keepAliveSwitch;
     private boolean syncing = false;
 
     @Override
@@ -49,6 +52,7 @@ public class SettingsActivity extends Activity {
         bottomBarSwitch = findViewById(R.id.switch_bottom_bar);
         threeDotSwitch = findViewById(R.id.switch_three_dot);
         dockSwitch = findViewById(R.id.switch_dock);
+        keepAliveSwitch = findViewById(R.id.switch_keep_alive);
 
         syncFromPrefs();
 
@@ -73,6 +77,13 @@ public class SettingsActivity extends Activity {
                 writePref(KEY_ENABLE_DOCK, isChecked);
             }
         });
+        keepAliveSwitch.setOnCheckedChangeListener(new CompoundButton.OnCheckedChangeListener() {
+            @Override
+            public void onCheckedChanged(CompoundButton buttonView, boolean isChecked) {
+                if (syncing) return;
+                writePref(KEY_KEEP_ALIVE, isChecked);
+            }
+        });
     }
 
     private void syncFromPrefs() {
@@ -80,6 +91,7 @@ public class SettingsActivity extends Activity {
         bottomBarSwitch.setChecked(readPref(KEY_HIDE_BOTTOM_BAR, true));
         threeDotSwitch.setChecked(readPref(KEY_HIDE_THREE_DOT, true));
         dockSwitch.setChecked(readPref(KEY_ENABLE_DOCK, true));
+        keepAliveSwitch.setChecked(readPref(KEY_KEEP_ALIVE, true));
         syncing = false;
     }
 

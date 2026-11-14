@@ -31,14 +31,16 @@ public final class ModulePrefs {
     private static void migrateOldPrivatePrefs(Context ctx, SharedPreferences dest) {
         if (dest.contains(SettingsActivity.KEY_HIDE_BOTTOM_BAR)
                 || dest.contains(SettingsActivity.KEY_HIDE_THREE_DOT)
-                || dest.contains(SettingsActivity.KEY_ENABLE_DOCK)) {
+                || dest.contains(SettingsActivity.KEY_ENABLE_DOCK)
+                || dest.contains(SettingsActivity.KEY_KEEP_ALIVE)) {
             return;
         }
         SharedPreferences old = ctx.getSharedPreferences(NAME, Context.MODE_PRIVATE);
         if (old == dest) return;
         if (!old.contains(SettingsActivity.KEY_HIDE_BOTTOM_BAR)
                 && !old.contains(SettingsActivity.KEY_HIDE_THREE_DOT)
-                && !old.contains(SettingsActivity.KEY_ENABLE_DOCK)) {
+                && !old.contains(SettingsActivity.KEY_ENABLE_DOCK)
+                && !old.contains(SettingsActivity.KEY_KEEP_ALIVE)) {
             return;
         }
         dest.edit()
@@ -48,6 +50,8 @@ public final class ModulePrefs {
                         old.getBoolean(SettingsActivity.KEY_HIDE_THREE_DOT, true))
                 .putBoolean(SettingsActivity.KEY_ENABLE_DOCK,
                         old.getBoolean(SettingsActivity.KEY_ENABLE_DOCK, true))
+                .putBoolean(SettingsActivity.KEY_KEEP_ALIVE,
+                        old.getBoolean(SettingsActivity.KEY_KEEP_ALIVE, true))
                 .commit();
     }
 }

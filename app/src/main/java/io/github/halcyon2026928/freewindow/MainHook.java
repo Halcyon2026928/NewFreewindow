@@ -10,6 +10,7 @@ import android.graphics.Rect;
 import android.graphics.Region;
 import android.graphics.drawable.GradientDrawable;
 import android.os.Build;
+import android.os.Handler;
 import android.util.TypedValue;
 import android.view.Gravity;
 import android.view.MotionEvent;
@@ -58,6 +59,8 @@ public class MainHook implements IXposedHookLoadPackage {
     private static ClassLoader sClassLoader;
     /** 当前点击的悬浮球 View。 */
     private static Object sCurrentFloatHandleView;
+    /** 悬浮球所在线程（android.ui）的 Handler，点击那一刻抓取，恢复后用它解除 sRestoring。 */
+    private static Handler sHandleHandler;
     /** 坞窗容器（全局唯一）。 */
     private static FrameLayout sDockContainer;
     private static View sDockPanel;
@@ -73,6 +76,8 @@ public class MainHook implements IXposedHookLoadPackage {
     private static final List<Object> sDockApps = new ArrayList<>();
     /** 坞窗是否正在显示。 */
     private static boolean sDockShowing = false;
+    /** 我们自己正在走官方恢复路径：此时放行 startFlexibleFreeformFromHandleView，别再弹坞窗。 */
+    private static volatile boolean sRestoring = false;
 
     @Override
     public void handleLoadPackage(XC_LoadPackage.LoadPackageParam lpparam) {
@@ -149,6 +154,28 @@ public class MainHook implements IXposedHookLoadPackage {
     }
 
     private void hookSystemServer(XC_LoadPackage.LoadPackageParam lpparam) {
+        // 贴边保活：与 GUI 装饰项彼此独立，先装；失败不影响后续 hook。
+        try {
+            FloatKeepAliveHook.install(lpparam.classLoader);
+        } catch (Throwable t) {
+            XposedBridge.log(TAG + " FloatKeepAliveHook install failed: " + t.getMessage());
+        }
+
+        // 单应用静音要用 AudioService 实例：LocalServices 查不到时靠构造期 hook 兜底。
+        try {
+            Class<?> audioCls = XposedHelpers.findClass(
+                    "com.android.server.audio.AudioService", lpparam.classLoader);
+            XposedBridge.hookAllConstructors(audioCls, new XC_MethodHook() {
+                @Override
+                protected void afterHookedMethod(MethodHookParam param) {
+                    sAudioService = param.thisObject;
+                    XposedBridge.log(TAG + " mute: captured AudioService instance");
+                }
+            });
+        } catch (Throwable t) {
+            XposedBridge.log(TAG + " mute: AudioService constructor hook failed: " + t.getMessage());
+        }
+
         try {
             Class<?> captionViewClass = XposedHelpers.findClass(
                     "com.android.server.wm.FlexibleTaskCaptionView", lpparam.classLoader);
@@ -525,6 +552,11 @@ public class MainHook implements IXposedHookLoadPackage {
                         @Override
                         protected void beforeHookedMethod(MethodHookParam param) {
                             try {
+                                // 我们自己正在走官方恢复：放行，别再弹坞窗。
+                                if (sRestoring) {
+                                    XposedBridge.log(TAG + " restoring in progress, pass through official restore");
+                                    return;
+                                }
                                 Object floatHandleView = param.thisObject;
                                 try {
                                     Context ctx = (Context) XposedHelpers.callMethod(floatHandleView, "getContext");
@@ -545,6 +577,9 @@ public class MainHook implements IXposedHookLoadPackage {
                                 XposedBridge.log(TAG + " float handle clicked, reason=" + reason);
                                 param.setResult(false);
                                 sCurrentFloatHandleView = floatHandleView;
+                                if (floatHandleView instanceof View) {
+                                    sHandleHandler = ((View) floatHandleView).getHandler();
+                                }
                                 showFloatDock(floatHandleView, floatHandleInfo, cl);
                             } catch (Throwable t) {
                                 XposedBridge.log(TAG + " hookFloatHandleClick error: " + t.getMessage());
@@ -692,15 +727,29 @@ public class MainHook implements IXposedHookLoadPackage {
                 @Override
                 public boolean onTouch(View v, MotionEvent event) {
                     if (event.getAction() == MotionEvent.ACTION_DOWN) {
-                        int[] loc = new int[2];
-                        finalDock.getLocationOnScreen(loc);
                         float x = event.getRawX();
                         float y = event.getRawY();
+                        int[] loc = new int[2];
+                        finalDock.getLocationOnScreen(loc);
                         boolean insideDock = x >= loc[0] && x <= loc[0] + finalDock.getWidth()
                                 && y >= loc[1] && y <= loc[1] + finalDock.getHeight();
                         if (!insideDock) {
+                            // 点在坞窗外：收起坞窗，菜单随坞窗一起移除
                             removeFloatDock();
                             return true;
+                        }
+                        // 菜单打开时，点在坞窗内但菜单外：只关菜单，不动坞窗
+                        if (sAppMenuView != null) {
+                            int[] mLoc = new int[2];
+                            sAppMenuView.getLocationOnScreen(mLoc);
+                            boolean inMenu = x >= mLoc[0] && x <= mLoc[0] + sAppMenuView.getWidth()
+                                    && y >= mLoc[1] && y <= mLoc[1] + sAppMenuView.getHeight();
+                            if (!inMenu) {
+                                XposedBridge.log(TAG + " tap outside menu, close it");
+                                removeAppMenu();
+                                return true;
+                            }
+                            return false;
                         }
                     }
                     return false;
@@ -788,12 +837,14 @@ public class MainHook implements IXposedHookLoadPackage {
             XposedBridge.log(TAG + " get icon error: " + t.getMessage());
         }
 
-        // 应用名称
+        // 应用名称：与图标同高并垂直居中，关掉字体上下留白，避免文字视觉上偏
         TextView nameTv = new TextView(ctx);
         nameTv.setTextSize(14);
         nameTv.setTextColor(0xFF000000);
         nameTv.setMaxLines(1);
-        LinearLayout.LayoutParams nameParams = new LinearLayout.LayoutParams(0, LinearLayout.LayoutParams.WRAP_CONTENT, 1f);
+        nameTv.setGravity(Gravity.CENTER_VERTICAL);
+        nameTv.setIncludeFontPadding(false);
+        LinearLayout.LayoutParams nameParams = new LinearLayout.LayoutParams(0, iconSize, 1f);
         nameParams.leftMargin = dpToPx(ctx, 10);
         topBar.addView(nameTv, nameParams);
         try {
@@ -806,11 +857,18 @@ public class MainHook implements IXposedHookLoadPackage {
             nameTv.setText(pkgName.isEmpty() ? "未知" : pkgName);
         }
 
-        // 三点菜单按钮
+        // 三点菜单按钮：加大触摸区并用标准点击回调（onTouch 容易被卡片点击/滚动吞掉）
         final TextView menuBtn = new TextView(ctx);
         menuBtn.setText("⋮");
         menuBtn.setTextSize(22);
         menuBtn.setTextColor(0xFF333333);
+        menuBtn.setGravity(Gravity.CENTER);
+        menuBtn.setPadding(dpToPx(ctx, 8), 0, dpToPx(ctx, 8), 0);
+        menuBtn.setMinWidth(dpToPx(ctx, 36));
+        menuBtn.setMinHeight(dpToPx(ctx, 36));
+        // 三个点字形在字体里重心偏下，整体上移 1.5dp 与图标/名称中线对齐
+        menuBtn.setTranslationY(-1.5f * ctx.getResources().getDisplayMetrics().density);
+        menuBtn.setClickable(true);
         topBar.addView(menuBtn);
 
         final String finalPkgName = pkgName;
@@ -819,15 +877,17 @@ public class MainHook implements IXposedHookLoadPackage {
         final Object finalInfo = floatHandleInfo;
         final ClassLoader finalCl = cl;
 
-        menuBtn.setOnTouchListener(new View.OnTouchListener() {
+        menuBtn.setOnClickListener(new View.OnClickListener() {
             @Override
-            public boolean onTouch(View v, MotionEvent event) {
-                XposedBridge.log(TAG + " menuBtn onTouch action=" + event.getAction());
-                if (event.getAction() == MotionEvent.ACTION_UP) {
-                    showAppMenu(ctx, menuBtn, finalPkgName, finalUserId, finalTaskId, finalInfo, finalCl);
-                    return true;
+            public void onClick(View v) {
+                // 菜单已打开时再点三点 = 关闭（toggle）
+                if (sAppMenuView != null) {
+                    XposedBridge.log(TAG + " menuBtn onClick, menu already open -> close");
+                    removeAppMenu();
+                    return;
                 }
-                return true;
+                XposedBridge.log(TAG + " menuBtn onClick, open menu");
+                showAppMenu(v.getContext(), menuBtn, finalPkgName, finalUserId, finalTaskId, finalInfo, finalCl);
             }
         });
 
@@ -840,63 +900,136 @@ public class MainHook implements IXposedHookLoadPackage {
         previewParams.bottomMargin = dpToPx(ctx, 10);
         card.addView(preview, previewParams);
 
-        View.OnClickListener restoreMini = new View.OnClickListener() {
+        View.OnClickListener restoreListener = new View.OnClickListener() {
             @Override
             public void onClick(View v) {
-                restoreMiniFromCard(finalInfo, finalCl);
+                restoreFloatInfo(finalInfo, finalCl);
             }
         };
-        preview.setOnClickListener(restoreMini);
-        card.setOnClickListener(restoreMini);
+        preview.setOnClickListener(restoreListener);
+        card.setOnClickListener(restoreListener);
     }
 
     /**
-     * 点击坞窗卡片：关闭坞窗，按官方 startActivityByFloatInfo 恢复为迷你浮窗。
+     * 点击坞窗卡片：按 ColorOS 官方入口恢复成贴边前的形态。
+     *
+     * 自由小窗贴边就回到自由小窗，迷你浮窗贴边就回到迷你浮窗——形态由 FloatHandleInfo
+     * 里记录的 zoomState/type 决定，官方
+     * {@code FloatHandleView.startFlexibleFreeformFromHandleView(info, reason)} 会自己把
+     * flexibleTaskInfo 的 bounds/scale/ratio 算好。
+     *
+     * 旧实现手动调 startActivityByFloatInfo，并强行把 state 改成 2、type 改成 3，
+     * 于是所有任务一律恢复成迷你浮窗（自由小窗贴边后回不到小窗），这就是本 bug 的根源。
+     * 该修复对齐 3.2 的 restoreFloatInfo 逻辑。
      */
-    private void restoreMiniFromCard(Object floatHandleInfo, ClassLoader cl) {
+    private void restoreFloatInfo(final Object floatHandleInfo, final ClassLoader cl) {
+        if (floatHandleInfo == null || cl == null) return;
+        final Object handle = sCurrentFloatHandleView;
+        int resolved = -1;
         try {
-            XposedBridge.log(TAG + " restoreMiniFromCard");
-            if (floatHandleInfo == null || cl == null) return;
-            try {
-                XposedHelpers.callMethod(floatHandleInfo, "setFlexibleTaskState", 2);
-            } catch (Throwable ignored) {
-                try {
-                    XposedHelpers.setIntField(floatHandleInfo, "zoomState", 2);
-                } catch (Throwable ignored2) {
-                }
+            resolved = XposedHelpers.getIntField(floatHandleInfo, "taskId");
+        } catch (Throwable ignored) {
+        }
+        final int taskId = resolved;
+        XposedBridge.log(TAG + " restoreFloatInfo taskId=" + taskId);
+        try {
+            if (taskId > 0) MirageWindowHook.clearHangUp(taskId);
+        } catch (Throwable ignored) {
+        }
+
+        // 先收起坞窗、恢复悬浮球；官方恢复成功后悬浮球会由系统重新隐藏。
+        removeFloatDock();
+
+        // 等坞窗滑出动画跑完（finishRemoveDock 会把悬浮球显示回来）再走官方恢复：
+        // 先收起坞窗、球归位，再由官方入口把任务恢复成贴边前的形态，时序与 3.2 一致。
+        sRestoring = true;
+        final Runnable restoreAction = new Runnable() {
+            @Override
+            public void run() {
+                doRestoreOfficial(floatHandleInfo, cl, handle, taskId);
             }
-            try {
-                int type = XposedHelpers.getIntField(floatHandleInfo, "type");
-                if (type == 0) {
-                    XposedHelpers.setIntField(floatHandleInfo, "type", 3);
-                }
-            } catch (Throwable ignored) {
-            }
-            Object fhc = XposedHelpers.callStaticMethod(
-                    XposedHelpers.findClass("com.android.server.wm.FloatHandleController", cl), "getInstance");
-            removeFloatDock();
-            try {
-                int tid = XposedHelpers.getIntField(floatHandleInfo, "taskId");
-                MirageWindowHook.clearHangUp(tid);
-            } catch (Throwable ignored) {
-            }
-            XposedHelpers.callMethod(fhc, "startActivityByFloatInfo", floatHandleInfo, "lively_panel");
-            XposedBridge.log(TAG + " restoreMiniFromCard startActivityByFloatInfo done");
-        } catch (Throwable t) {
-            XposedBridge.log(TAG + " restoreMiniFromCard error: " + t.getMessage());
+        };
+        Handler target = null;
+        if (handle instanceof View) {
+            target = ((View) handle).getHandler();
+        }
+        if (target == null) target = sHandleHandler;
+        if (target != null) {
+            target.postDelayed(restoreAction, DOCK_ANIM_MS + 50L);
+        } else {
+            restoreAction.run();
         }
     }
 
-    /** 弹出菜单（用 PopupWindow.showAsDropDown 自动锚定位置）。 */
-    private static android.widget.PopupWindow sAppMenuPopup = null;
+    /** 官方恢复：走 ColorOS 自己的“点悬浮球恢复”入口，保留小窗/迷你两种形态。 */
+    private void doRestoreOfficial(Object floatHandleInfo, ClassLoader cl, Object handle, int taskId) {
+        boolean restored = false;
+        if (handle != null) {
+            try {
+                XposedHelpers.callMethod(handle, "startFlexibleFreeformFromHandleView",
+                        floatHandleInfo, "freewindow_restore");
+                restored = true;
+                XposedBridge.log(TAG + " restore via official handle path taskId=" + taskId);
+            } catch (Throwable t) {
+                XposedBridge.log(TAG + " official restore failed, fallback: " + t.getMessage());
+            }
+        }
+        if (!restored) {
+            try {
+                Object fhc = XposedHelpers.callStaticMethod(
+                        XposedHelpers.findClass("com.android.server.wm.FloatHandleController", cl), "getInstance");
+                XposedHelpers.callMethod(fhc, "startActivityByFloatInfo", floatHandleInfo, "lively_panel");
+                XposedBridge.log(TAG + " restoreFloatInfo(fallback) done taskId=" + taskId);
+            } catch (Throwable t) {
+                XposedBridge.log(TAG + " restoreFloatInfo fallback failed: " + t.getMessage());
+            }
+        }
+        releaseRestoringGuard(handle);
+    }
+
+    /**
+     * 恢复期间别再拦一次悬浮球点击（否则会又弹一次坞窗）。
+     * 1.2 秒后解除；拿不到悬浮球线程的 Handler 时立即解除，保证不会永久失去坞窗。
+     */
+    private void releaseRestoringGuard(Object handle) {
+        Runnable reset = new Runnable() {
+            @Override
+            public void run() {
+                sRestoring = false;
+            }
+        };
+        Handler target = null;
+        if (handle instanceof View) {
+            target = ((View) handle).getHandler();
+        }
+        if (target == null) target = sHandleHandler;
+        if (target != null) {
+            target.postDelayed(reset, 1200L);
+        } else {
+            reset.run();
+        }
+    }
+
+    /**
+     * 菜单视图：直接贴在坞窗容器里，不再用 PopupWindow。
+     *
+     * 坞窗是 system_server 里 addView 的 FLAG_NOT_FOCUSABLE 窗口，PopupWindow 会再开一个子窗口，
+     * 父窗口不可聚焦时子窗口拿不到 token/焦点，showAsDropDown 静默失败，表现就是「点三点没反应」。
+     */
+    private static View sAppMenuView = null;
 
     /** 显示单个应用的弹出菜单（取消运行、取消静音、关闭）。 */
     private void showAppMenu(Context ctx, View anchor, final String pkgName, final int userId,
                              final int taskId, final Object floatHandleInfo, final ClassLoader cl) {
         XposedBridge.log(TAG + " showAppMenu called, pkg=" + pkgName);
         removeAppMenu();
+        if (!(sDockContainer instanceof ViewGroup)) {
+            XposedBridge.log(TAG + " showAppMenu: dock container missing");
+            return;
+        }
+        final ViewGroup container = sDockContainer;
 
-        final int menuWidth = dpToPx(ctx, 120);
+        final int menuWidth = dpToPx(ctx, 130);
         final int itemHeight = dpToPx(ctx, 44);
 
         // 菜单容器
@@ -908,8 +1041,9 @@ public class MainHook implements IXposedHookLoadPackage {
         menuContainer.setBackground(menuBg);
         menuContainer.setElevation(dpToPx(ctx, 8));
 
-        // 菜单项
-        String[] items = {"取消运行", "取消静音", "关闭"};
+        // 菜单项（未静音显示「启动静音」，已静音显示「取消静音」）
+        boolean muted = sMutedApps.contains(muteKey(pkgName, userId));
+        String[] items = {"取消运行", muted ? "取消静音" : "启动静音", "关闭"};
         for (int i = 0; i < items.length; i++) {
             final String item = items[i];
             // 分隔线（第一项不加）
@@ -937,38 +1071,211 @@ public class MainHook implements IXposedHookLoadPackage {
                     if ("取消运行".equals(item)) {
                         removeSingleApp(pkgName, userId, taskId, floatHandleInfo, cl);
                         removeFloatDock();
+                    } else if ("启动静音".equals(item) || "取消静音".equals(item)) {
+                        toggleMute(ctx, pkgName, userId, cl);
                     }
                 }
             });
             menuContainer.addView(itemTv, itemParams);
         }
 
-        // 用 PopupWindow 自动锚定在 anchor 下方
-        android.widget.PopupWindow popup = new android.widget.PopupWindow(
-                menuContainer, menuWidth, android.view.ViewGroup.LayoutParams.WRAP_CONTENT, true);
-        popup.setOutsideTouchable(true);
-        popup.setElevation(dpToPx(ctx, 8));
-        popup.setBackgroundDrawable(new android.graphics.drawable.ColorDrawable(android.graphics.Color.TRANSPARENT));
-        popup.setOnDismissListener(new android.widget.PopupWindow.OnDismissListener() {
-            @Override
-            public void onDismiss() {
-                sAppMenuPopup = null;
-            }
-        });
-        sAppMenuPopup = popup;
-        popup.showAsDropDown(anchor, -dpToPx(ctx, 30), dpToPx(ctx, 2));
-        XposedBridge.log(TAG + " showAppMenu popup shown");
+        // 定位：贴在三点点按钮正下方居中，左右不超出屏幕
+        int[] anchorLoc = new int[2];
+        anchor.getLocationOnScreen(anchorLoc);
+        int[] containerLoc = new int[2];
+        container.getLocationOnScreen(containerLoc);
+        int screenWidth = ctx.getResources().getDisplayMetrics().widthPixels;
+        int left = anchorLoc[0] - containerLoc[0] + anchor.getWidth() / 2 - menuWidth / 2;
+        left = Math.max(dpToPx(ctx, 8), Math.min(left, screenWidth - menuWidth - dpToPx(ctx, 8)));
+        int top = anchorLoc[1] - containerLoc[1] + anchor.getHeight() + dpToPx(ctx, 4);
+
+        FrameLayout.LayoutParams lp = new FrameLayout.LayoutParams(
+                menuWidth, ViewGroup.LayoutParams.WRAP_CONTENT);
+        lp.leftMargin = left;
+        lp.topMargin = top;
+        container.addView(menuContainer, lp);
+        sAppMenuView = menuContainer;
+        XposedBridge.log(TAG + " showAppMenu attached at " + left + "," + top);
     }
 
-    /** 移除弹出菜单。 */
+    /** 移除菜单。 */
     private void removeAppMenu() {
-        if (sAppMenuPopup != null) {
+        View menu = sAppMenuView;
+        sAppMenuView = null;
+        if (menu != null && menu.getParent() instanceof ViewGroup) {
             try {
-                sAppMenuPopup.dismiss();
+                ((ViewGroup) menu.getParent()).removeView(menu);
             } catch (Throwable ignored) {
             }
-            sAppMenuPopup = null;
         }
+    }
+
+    // ==================== 单应用静音（参考 FlymeFreeform 的 ColorOsWindowGestures） ====================
+
+    /**
+     * 已被坞窗菜单静音的应用，key = pkg + "/" + userId。
+     * 内存态：system_server 重启即清空，不落盘（静音只是临时手段，与 ColorOS 单应用音量同一通道）。
+     */
+    private static final java.util.Set<String> sMutedApps =
+            java.util.concurrent.ConcurrentHashMap.newKeySet();
+
+    private static String muteKey(String pkgName, int userId) {
+        return pkgName + "/" + userId;
+    }
+
+    /** 切换单个应用的播放音量（0 = 静音，1 = 恢复），只影响该 uid，不动媒体流整体音量。 */
+    private void toggleMute(Context ctx, String pkgName, int userId, ClassLoader cl) {
+        String key = muteKey(pkgName, userId);
+        boolean muted = sMutedApps.contains(key);
+        int uid = -1;
+        try {
+            Object appInfo = XposedHelpers.callMethod(ctx.getPackageManager(),
+                    "getApplicationInfoAsUser", pkgName, 0, userId);
+            uid = XposedHelpers.getIntField(appInfo, "uid");
+        } catch (Throwable t) {
+            XposedBridge.log(TAG + " mute: uid lookup failed for " + pkgName + ": " + t.getMessage());
+        }
+        if (uid <= 0) return;
+
+        if (!setVolumeForUid(muted ? 1f : 0f, uid, pkgName, cl)) {
+            XposedBridge.log(TAG + " mute: setVolumeForUid unavailable, skip pkg=" + pkgName);
+            return;
+        }
+        if (muted) sMutedApps.remove(key); else sMutedApps.add(key);
+        XposedBridge.log(TAG + (muted ? " unmute " : " mute ") + pkgName + " uid=" + uid);
+    }
+
+    /**
+     * 走 ColorOS 自己的单应用音量通道：
+     * AudioService.mPlaybackMonitor.mPamExt.setVolumeForUid(volume, uid, pkg, true)。
+     * mPamExt 不存在时退回 monitor 本身，都没有就返回 false。
+     */
+    private boolean setVolumeForUid(float volume, int uid, String pkgName, ClassLoader cl) {
+        try {
+            Object audio = resolveAudioService(cl);
+            if (audio == null) {
+                XposedBridge.log(TAG + " mute: AudioService not found");
+                return false;
+            }
+            Object monitor = readFieldDeep(audio, "mPlaybackMonitor");
+            if (monitor == null) {
+                XposedBridge.log(TAG + " mute: mPlaybackMonitor missing on "
+                        + audio.getClass().getName());
+                return false;
+            }
+            Object ext = readFieldDeep(monitor, "mPamExt");
+            if (invokeSetVolumeForUid(ext, volume, uid, pkgName)) return true;
+            if (ext != null) {
+                XposedBridge.log(TAG + " mute: mPamExt has no setVolumeForUid, try monitor");
+            }
+            return invokeSetVolumeForUid(monitor, volume, uid, pkgName);
+        } catch (Throwable t) {
+            XposedBridge.log(TAG + " mute: setVolumeForUid error " + t.getMessage());
+            return false;
+        }
+    }
+
+    /**
+     * 拿 AudioService 实例。
+     *
+     * Android 13 起 SystemServer 往 LocalServices 注册的 key 是 AudioServiceInternal
+     * （实现类仍是 AudioService），所以只查 AudioService.class 会拿到 null —— 这就是
+     * 「静音没效果、日志 mute: AudioService not found」的原因。
+     * 这里按 AudioService → AudioServiceInternal → OplusAudioService 的顺序逐个尝试，
+     * 另外保留一份构造期 hook 抓到的实例做兜底。
+     */
+    private static Object sAudioService = null;
+
+    private Object resolveAudioService(ClassLoader cl) {
+        if (sAudioService != null) return sAudioService;
+        String[] keys = {
+                "com.android.server.audio.AudioService",
+                "com.android.server.audio.AudioServiceInternal",
+                "com.android.server.audio.OplusAudioService",
+                "com.oplus.server.audio.OplusAudioService",
+        };
+        try {
+            Class<?> localServices = XposedHelpers.findClass("com.android.server.LocalServices", cl);
+            for (String key : keys) {
+                try {
+                    Class<?> c = XposedHelpers.findClass(key, cl);
+                    Object svc = XposedHelpers.callStaticMethod(localServices, "getService", c);
+                    if (svc != null) {
+                        sAudioService = svc;
+                        XposedBridge.log(TAG + " mute: AudioService via " + key
+                                + " -> " + svc.getClass().getName());
+                        return svc;
+                    }
+                } catch (Throwable ignored) {
+                }
+            }
+        } catch (Throwable t) {
+            XposedBridge.log(TAG + " mute: LocalServices lookup error " + t.getMessage());
+        }
+        return null;
+    }
+
+    /** 沿父类链找字段（AudioService 的字段可能声明在基类）。 */
+    private static Object readFieldDeep(Object obj, String name) {
+        Class<?> c = obj == null ? null : obj.getClass();
+        while (c != null) {
+            try {
+                java.lang.reflect.Field f = c.getDeclaredField(name);
+                f.setAccessible(true);
+                return f.get(obj);
+            } catch (NoSuchFieldException e) {
+                c = c.getSuperclass();
+            } catch (Throwable ignored) {
+                return null;
+            }
+        }
+        return null;
+    }
+
+    /**
+     * 按名字 + 4 个参数找 setVolumeForUid 并调用。
+     * 参数顺序在不同 ROM 上可能是 (float,int,String,boolean) 或 (int,float,String,boolean)，
+     * 所以按声明类型逐个填，而不是写死顺序。
+     */
+    private static boolean invokeSetVolumeForUid(Object target, float volume, int uid, String pkgName) {
+        if (target == null) return false;
+        Class<?> c = target.getClass();
+        while (c != null) {
+            java.lang.reflect.Method[] methods = c.getDeclaredMethods();
+            for (java.lang.reflect.Method m : methods) {
+                if (!"setVolumeForUid".equals(m.getName()) || m.getParameterCount() != 4) continue;
+                Class<?>[] ps = m.getParameterTypes();
+                Object[] args = new Object[4];
+                int intCount = 0;
+                boolean ok = true;
+                for (int i = 0; i < 4; i++) {
+                    Class<?> p = ps[i];
+                    if (p == float.class || p == Float.class) {
+                        args[i] = volume;
+                    } else if (p == int.class || p == Integer.class) {
+                        intCount++;
+                        args[i] = intCount == 1 ? uid : 0;
+                    } else if (p == String.class) {
+                        args[i] = pkgName;
+                    } else if (p == boolean.class || p == Boolean.class) {
+                        args[i] = Boolean.TRUE;
+                    } else {
+                        ok = false;
+                        break;
+                    }
+                }
+                if (!ok) continue;
+                try {
+                    m.setAccessible(true);
+                    m.invoke(target, args);
+                    return true;
+                } catch (Throwable t) {
+                    XposedBridge.log(TAG + " mute: invoke " + m.getName() + " failed: " + t.getMessage());
+                }
+            }
+            c = c.getSuperclass();
+        }
+        return false;
     }
 
     /** 清除单个应用：用官方 removeFloatHandle 移除悬浮球 + 杀进程。 */
