@@ -449,6 +449,13 @@ public class MainHook implements IXposedHookLoadPackage {
             XposedBridge.log(TAG + " mute: AudioService constructor hook failed: " + t.getMessage());
         }
 
+        // 静音不该一直挂着：应用进程全部退出后自动把该 uid 的音量恢复。
+        try {
+            hookMuteAutoRestore(lpparam.classLoader);
+        } catch (Throwable t) {
+            XposedBridge.log(TAG + " mute restore install failed: " + t.getMessage());
+        }
+
         try {
             Class<?> captionViewClass = XposedHelpers.findClass(
                     "com.android.server.wm.FlexibleTaskCaptionView", lpparam.classLoader);
@@ -1727,7 +1734,7 @@ public class MainHook implements IXposedHookLoadPackage {
         menuContainer.setElevation(dpToPx(ctx, 8));
 
         // 菜单项（未静音显示「启动静音」，已静音显示「取消静音」）
-        boolean muted = sMutedApps.contains(muteKey(pkgName, userId));
+        boolean muted = sMutedApps.containsKey(muteKey(pkgName, userId));
         String[] items = {"取消运行", muted ? "取消静音" : "启动静音", "关闭"};
         for (int i = 0; i < items.length; i++) {
             final String item = items[i];
@@ -1812,20 +1819,26 @@ public class MainHook implements IXposedHookLoadPackage {
     // ==================== 单应用静音（参考 FlymeFreeform 的 ColorOsWindowGestures） ====================
 
     /**
-     * 已被坞窗菜单静音的应用，key = pkg + "/" + userId。
+     * 已被坞窗菜单静音的应用，key = pkg + "/" + userId，value = 当时算出来的 uid。
      * 内存态：system_server 重启即清空，不落盘（静音只是临时手段，与 ColorOS 单应用音量同一通道）。
+     * 值是 uid 是为了能在进程全部退出后按 uid 精确恢复音量。
      */
-    private static final java.util.Set<String> sMutedApps =
-            java.util.concurrent.ConcurrentHashMap.newKeySet();
+    private static final java.util.Map<String, Integer> sMutedApps =
+            new java.util.concurrent.ConcurrentHashMap<>();
 
     private static String muteKey(String pkgName, int userId) {
         return pkgName + "/" + userId;
     }
 
+    /** uid -> userId，等同 UserHandle.getUserId（@hide，编译期 android.jar 里没有，只能自己算）。 */
+    private static int userIdOf(int uid) {
+        return uid / 100000;
+    }
+
     /** 切换单个应用的播放音量（0 = 静音，1 = 恢复），只影响该 uid，不动媒体流整体音量。 */
     private void toggleMute(Context ctx, String pkgName, int userId, ClassLoader cl) {
         String key = muteKey(pkgName, userId);
-        boolean muted = sMutedApps.contains(key);
+        boolean muted = sMutedApps.containsKey(key);
         int uid = -1;
         try {
             Object appInfo = XposedHelpers.callMethod(ctx.getPackageManager(),
@@ -1840,7 +1853,7 @@ public class MainHook implements IXposedHookLoadPackage {
             XposedBridge.log(TAG + " mute: setVolumeForUid unavailable, skip pkg=" + pkgName);
             return;
         }
-        if (muted) sMutedApps.remove(key); else sMutedApps.add(key);
+        if (muted) sMutedApps.remove(key); else sMutedApps.put(key, uid);
         XposedBridge.log(TAG + (muted ? " unmute " : " mute ") + pkgName + " uid=" + uid);
     }
 
@@ -1975,6 +1988,170 @@ public class MainHook implements IXposedHookLoadPackage {
             c = c.getSuperclass();
         }
         return false;
+    }
+
+    // ==================== 静音自动恢复（应用完全退出即取消静音） ====================
+
+    private static android.os.Handler sServerHandler = null;
+    /** hook 期间顺手记下的 AMS 实例，用它读进程表判断「应用还有没有活着」。 */
+    private static Object sAmsInstance = null;
+
+    /**
+     * 静音是挂在 uid 上的，应用退到后台、甚至被划掉之后系统不一定帮你清。
+     * 所以接管 AMS 的进程清理回调：某个包的进程被清掉后，延迟一点点再看这个 uid
+     * 还有没有别的进程（多进程应用要等到全部结束）；一个都不剩就恢复 1 倍音量。
+     */
+    private void hookMuteAutoRestore(ClassLoader cl) {
+        Class<?> amsCls;
+        try {
+            amsCls = XposedHelpers.findClass("com.android.server.am.ActivityManagerService", cl);
+        } catch (Throwable t) {
+            XposedBridge.log(TAG + " mute restore: AMS not found: " + t.getMessage());
+            return;
+        }
+        String[] names = {"cleanUpApplicationRecordLocked", "handleAppDiedLocked"};
+        boolean hooked = false;
+        for (String name : names) {
+            try {
+                XposedBridge.hookAllMethods(amsCls, name, new XC_MethodHook() {
+                    @Override
+                    protected void afterHookedMethod(MethodHookParam param) {
+                        if (sAmsInstance == null && param.thisObject != null) {
+                            sAmsInstance = param.thisObject;
+                        }
+                        if (param.args == null || param.args.length == 0) return;
+                        scheduleMuteRestore(param.args[0], cl);
+                    }
+                });
+                hooked = true;
+                XposedBridge.log(TAG + " mute restore: hooked " + name);
+            } catch (Throwable t) {
+                XposedBridge.log(TAG + " mute restore: hook " + name + " failed: " + t.getMessage());
+            }
+        }
+        if (!hooked) {
+            XposedBridge.log(TAG + " mute restore: no AMS hook installed, keep mute as is");
+        }
+    }
+
+    /** 进程清理回调里先记下 uid/包名，延迟 1 秒再判断（进程表还没同步完会误判）。 */
+    private void scheduleMuteRestore(Object app, final ClassLoader cl) {
+        if (app == null || sMutedApps.isEmpty()) return;
+        final int uid;
+        final String pkgName;
+        try {
+            Object info = readFieldDeep(app, "info");
+            if (info == null) return;
+            uid = XposedHelpers.getIntField(info, "uid");
+            Object name = XposedHelpers.getObjectField(info, "packageName");
+            pkgName = name instanceof String ? (String) name : null;
+        } catch (Throwable t) {
+            return;
+        }
+        if (uid <= 0 || pkgName == null) return;
+        final String key = muteKey(pkgName, userIdOf(uid));
+        if (!sMutedApps.containsKey(key)) return;
+        try {
+            if (sServerHandler == null) {
+                sServerHandler = new android.os.Handler(android.os.Looper.getMainLooper());
+            }
+            sServerHandler.postDelayed(new Runnable() {
+                @Override
+                public void run() {
+                    restoreMuteIfAppGone(key, pkgName, uid, cl);
+                }
+            }, 1000L);
+        } catch (Throwable t) {
+            XposedBridge.log(TAG + " mute restore: post failed " + t.getMessage());
+        }
+    }
+
+    /** 该 uid 一个进程都不剩时才恢复音量；还有后台进程就继续静音。 */
+    private void restoreMuteIfAppGone(String key, String pkgName, int uid, ClassLoader cl) {
+        try {
+            if (!sMutedApps.containsKey(key)) return;
+            if (uidHasProcess(uid)) {
+                XposedBridge.log(TAG + " mute restore: " + pkgName + " still has process, keep muted");
+                return;
+            }
+            if (setVolumeForUid(1f, uid, pkgName, cl)) {
+                sMutedApps.remove(key);
+                XposedBridge.log(TAG + " mute restore: " + pkgName + " uid=" + uid
+                        + " fully exited -> volume restored");
+            }
+        } catch (Throwable t) {
+            XposedBridge.log(TAG + " mute restore: error " + t.getMessage());
+        }
+    }
+
+    /**
+     * uid 是否还有活着的进程。
+     * 先读 AMS 自己的进程表（system_server 里拿到的是全量），读不到再退到公开 API，
+     * 两边都判断不出来时返回 true —— 宁可继续静音，也不要把用户主动开的静音误关掉。
+     */
+    private boolean uidHasProcess(int uid) {
+        try {
+            Object ams = sAmsInstance;
+            if (ams != null) {
+                Object processList = readFieldDeep(ams, "mProcessList");
+                if (processList != null) {
+                    Object procs = null;
+                    try {
+                        procs = XposedHelpers.callMethod(processList, "getProcesses");
+                    } catch (Throwable ignored) {
+                        // 某些 ROM 没有这个方法，下面退到 mPidsSelfLocked
+                    }
+                    if (procs instanceof java.util.List) {
+                        for (Object p : (java.util.List<?>) procs) {
+                            try {
+                                if (XposedHelpers.getIntField(p, "uid") == uid) return true;
+                            } catch (Throwable ignored) {
+                                // 单个 ProcessRecord 读不到就跳过
+                            }
+                        }
+                        // 列表读到了且里面没有这个 uid -> 明确已退出
+                        return false;
+                    }
+                    Object pids = readFieldDeep(processList, "mPidsSelfLocked");
+                    if (pids instanceof java.util.Map) {
+                        for (Object p : ((java.util.Map<?, ?>) pids).values()) {
+                            try {
+                                if (XposedHelpers.getIntField(p, "uid") == uid) return true;
+                            } catch (Throwable ignored) {
+                            }
+                        }
+                        return false;
+                    }
+                }
+            }
+        } catch (Throwable t) {
+            XposedBridge.log(TAG + " mute restore: process table read failed " + t.getMessage());
+        }
+        // 兜底：公开 API
+        try {
+            Object at = XposedHelpers.callStaticMethod(
+                    XposedHelpers.findClass("android.app.ActivityThread", null),
+                    "currentActivityThread");
+            Object sysCtx = at == null ? null : XposedHelpers.callMethod(at, "getSystemContext");
+            android.app.ActivityManager am = sysCtx instanceof Context
+                    ? (android.app.ActivityManager) ((Context) sysCtx)
+                    .getSystemService(Context.ACTIVITY_SERVICE)
+                    : null;
+            if (am != null) {
+                java.util.List<android.app.ActivityManager.RunningAppProcessInfo> list =
+                        am.getRunningAppProcesses();
+                if (list != null) {
+                    for (android.app.ActivityManager.RunningAppProcessInfo pi : list) {
+                        if (pi.uid == uid) return true;
+                    }
+                    return false;
+                }
+            }
+        } catch (Throwable t) {
+            XposedBridge.log(TAG + " mute restore: running processes fallback failed " + t.getMessage());
+        }
+        XposedBridge.log(TAG + " mute restore: cannot tell whether uid " + uid + " alive, skip");
+        return true;
     }
 
     /** 清除单个应用：用官方 removeFloatHandle 移除悬浮球 + 杀进程。 */
