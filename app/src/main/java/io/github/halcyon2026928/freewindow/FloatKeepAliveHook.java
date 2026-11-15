@@ -86,13 +86,6 @@ final class FloatKeepAliveHook {
     private static final long[] ROTATION_CHECK_DELAYS_MS = {800L, 2000L, 4000L, 8000L};
     private static final long[] UNLOCK_CHECK_DELAYS_MS = {800L, 1600L, 2600L};
 
-    /**
-     * 把浮标任务收回 mini 的重试点。原厂 switchState 有多道保护
-     * （isAnimatingSwitchToZoom / inOrientationChanging / 自定义过渡类型），
-     * 刚弹窗那一刻经常会直接 return，所以要隔一段时间多试几次。
-     */
-    private static final long[] MINI_RESTORE_DELAYS_MS = {350L, 900L, 1700L, 2800L, 4200L};
-
     /** 复查 doze 白名单的时间间隔。 */
     private static final long EXEMPT_SWEEP_MS = 60000L;
 
@@ -113,9 +106,6 @@ final class FloatKeepAliveHook {
      * 否则会把正常点开也拦掉（上游 2.3.6 修过的「解锁后从浮标打不开」）。
      */
     private static volatile long sUserFloatOpenAt = 0L;
-
-    /** FlexibleTaskController 实例，用来调原厂 switchState(task, 2) 把任务收回浮标。 */
-    private static volatile Object sFlexibleController;
 
     /** 假暂停接管成功后为 true；只有它成立时才跳过暂停超时，避免服务端卡在 PAUSING。 */
     private static volatile boolean sPauseBypassActive = false;
@@ -216,13 +206,9 @@ final class FloatKeepAliveHook {
             }
         });
 
-        // 2) setVisibleRequested(boolean[, boolean])：只观测 + 收尾。
-        //
-        // 改参数行不通（3820/5200 实测）：
-        //   · 拒绝提交 → 任务窗口长期不可见、输入焦点对不上，调音量直接 ANR 被杀；
-        //   · 一路放行 → 任务被正常抬成 zoom，官方自由小窗弹出来。
-        // 所以可见性完全交回系统，等窗口该显示的那一下过去，再用原厂自己的
-        // switchState(task, 2) 把任务收成浮标——状态由原厂维护，不会留下半死窗口。
+        // 2) setVisibleRequested(boolean[, boolean])：浮标任务不接受「抬成可见」。
+        //    先放行再压回会让窗口显示半拍又消失、输入焦点丢掉（3820 实测 ANR），
+        //    所以直接在 before 里拒掉；用户点浮标打开时会先经过 moveTaskToFront 打开白名单。
         hooked |= hookAllSafe(sRecordClass, "setVisibleRequested", new XC_MethodHook() {
             @Override
             protected void beforeHookedMethod(MethodHookParam param) {
@@ -232,10 +218,15 @@ final class FloatKeepAliveHook {
                     if (!(arg instanceof Boolean)) return;
                     boolean visible = ((Boolean) arg).booleanValue();
                     if (!shouldKeep(param.thisObject)) return;
-                    int taskId = taskIdOf(param.thisObject);
                     if (visible) {
-                        logOnce("pass_raised_" + taskId, "task" + taskId + " 抬成可见（放行）");
-                        scheduleMiniRestore(taskId);
+                        if (SystemClock.uptimeMillis() < sUserFloatOpenAt) {
+                            logOnce("useropen_" + taskIdOf(param.thisObject),
+                                    "task" + taskIdOf(param.thisObject) + " 用户从浮标打开，放行可见");
+                            return;
+                        }
+                        param.args[0] = Boolean.FALSE;
+                        logOnce("deny_raised_" + taskIdOf(param.thisObject),
+                                "task" + taskIdOf(param.thisObject) + " 拒绝抬成可见（浮标保持）");
                     } else {
                         logSkip(param.thisObject, "visible_requested_false");
                     }
@@ -245,7 +236,8 @@ final class FloatKeepAliveHook {
             }
         });
 
-        // 2b) setVisibility(boolean)：系统的切换流程会直接在这里写可见性，同样只观测 + 收尾。
+        // 2b) setVisibility(boolean)：系统的应用切换流程会直接在这里写可见性，
+        //     不经过 setVisibleRequested，浮标任务同样要拒掉。
         hooked |= hookAllSafe(sRecordClass, "setVisibility", new XC_MethodHook() {
             @Override
             protected void beforeHookedMethod(MethodHookParam param) {
@@ -254,9 +246,10 @@ final class FloatKeepAliveHook {
                     Object arg = param.args[0];
                     if (!(arg instanceof Boolean) || !((Boolean) arg).booleanValue()) return;
                     if (!shouldKeep(param.thisObject)) return;
-                    int taskId = taskIdOf(param.thisObject);
-                    logOnce("pass_visibility_" + taskId, "task" + taskId + " 提交可见性（放行）");
-                    scheduleMiniRestore(taskId);
+                    if (SystemClock.uptimeMillis() < sUserFloatOpenAt) return;
+                    param.args[0] = Boolean.FALSE;
+                    logOnce("deny_visibility_" + taskIdOf(param.thisObject),
+                            "task" + taskIdOf(param.thisObject) + " 拒绝提交可见性（浮标保持）");
                 } catch (Throwable t) {
                     XposedBridge.log(TAG + " setVisibility hook error: " + t.getMessage());
                 }
@@ -499,99 +492,51 @@ final class FloatKeepAliveHook {
     }
 
     /**
-     * 把浮标任务收回 mini（原厂 switchState 的 nextState=2 就是「变成浮标」）。
-     *
-     * 之前用手工压可见性来阻止弹窗，结果窗口和输入焦点对不上：
-     * 锁屏解锁后一调音量就 `Input dispatching timed out (Application does not have a focused
-     * window)`，应用直接 ANR 被杀（3820 03:20、5200 03:29 都复现）。
-     * 现在可见性完全交回系统，等窗口该显示的那一下过去，再用原厂自己的状态机收回浮标，
-     * 状态全程由原厂维护，不会留下半死窗口。
+     * 浮标里的任务刚被按成可见时，等一拍再看：如果它还在浮标列表里，
+     * 说明不是用户点浮标打开的（用户打开会让任务退出浮标），而是应用自己起新页面
+     * 把窗口抬起来了——这时把它压回不可见，浮标保持原样。
      */
-    private static void scheduleMiniRestore(final int taskId) {
-        if (taskId <= 0) return;
+    private static void scheduleRehideRaised(final Object record) {
         Handler handler = sHandler;
-        if (handler == null) return;
-        for (int i = 0; i < MINI_RESTORE_DELAYS_MS.length; i++) {
-            final int attempt = i;
-            handler.postDelayed(new Runnable() {
-                @Override
-                public void run() {
-                    try {
-                        if (!keepAliveEnabled()) return;
-                        // 用户主动点浮标打开：别把用户的应用又按回浮标。
-                        if (SystemClock.uptimeMillis() < sUserFloatOpenAt) return;
-                        Object controller = sFlexibleController;
-                        if (controller == null) return;
-                        Object task = taskObjectOf(taskId);
-                        if (task == null) return;
-                        // 窗口已经不在（任务回到浮标形态）就不用再动。
-                        if (Boolean.FALSE.equals(callNoArg(task, "isVisible"))) return;
-                        callMethod(controller, "switchState", task, Integer.valueOf(2),
-                                "keepalive_restore_mini");
-                        logOnce("mini_" + taskId + "_" + attempt,
-                                "task" + taskId + " 收回到浮标（switchState=2，第" + (attempt + 1) + "次）");
-                    } catch (Throwable t) {
-                        XposedBridge.log(TAG + " mini restore error: " + t.getMessage());
-                    }
-                }
-            }, MINI_RESTORE_DELAYS_MS[i]);
-        }
-    }
-
-    /** 从 taskId 反查原厂的 Task 对象。 */
-    private static Object taskObjectOf(int taskId) {
-        WeakReference<Object> ref = sTracked.get(taskId);
-        Object record = ref == null ? null : ref.get();
-        if (record == null) return null;
-        Object task = readField(record, "task");
-        if (task == null) task = readField(record, "mTask");
-        if (task == null) task = callNoArg(record, "getTask");
-        return task;
-    }
-
-    /** 按名字 + 参数个数调实例方法（原厂很多方法的形参是 int/boolean，不能按 arg.getClass() 找）。 */
-    private static Object callMethod(Object instance, String name, Object... args) {
-        if (instance == null) return null;
-        Class<?> type = instance.getClass();
-        while (type != null) {
-            for (Method method : type.getDeclaredMethods()) {
-                if (!method.getName().equals(name)) continue;
-                if (method.getParameterTypes().length != args.length) continue;
+        if (handler == null || record == null) return;
+        handler.postDelayed(new Runnable() {
+            @Override
+            public void run() {
                 try {
-                    method.setAccessible(true);
-                    return method.invoke(instance, args);
-                } catch (Throwable ignored) {
-                    // 继续找下一个同名同参数个数的重载
+                    final int taskId = taskIdOf(record);
+                    if (taskId <= 0) return;
+                    // 已经退出浮标 → 用户主动打开，放行。
+                    if (!isFloating(taskId)) return;
+                    if (!shouldKeep(record)) return;
+                    if (!Boolean.TRUE.equals(readField(record, "mVisibleRequested"))) return;
+                    callNoArg(record, "setVisibleRequested", Boolean.FALSE);
+                    logOnce("rehide_raised_" + taskId,
+                            "task" + taskId + " 被抬起后又压回浮标（不是用户点开）");
+                } catch (Throwable t) {
+                    XposedBridge.log(TAG + " rehide raised error: " + t.getMessage());
                 }
             }
-            type = type.getSuperclass();
-        }
-        return null;
+        }, 400);
     }
 
-    /** 把所有还在浮标里的任务收回 mini。 */
-    private static void miniRestoreTracked(String reason) {
+    /** 仍是浮标、却被按成可见的任务，重新压回不可见，让它回到浮标状态。 */
+    private static void rehideTracked(String reason) {
         for (java.util.Map.Entry<Integer, WeakReference<Object>> entry : sTracked.entrySet()) {
-            int taskId = entry.getKey().intValue();
             Object record = entry.getValue() == null ? null : entry.getValue().get();
             if (record == null) continue;
-            if (!isFloating(taskId)) continue;
-            logOnce("mini_" + taskId + "_" + reason,
-                    "task" + taskId + " 收回浮标 (" + reason + ")");
-            scheduleMiniRestore(taskId);
+            if (!isFloating(entry.getKey().intValue())) continue;
+            try {
+                if (Boolean.TRUE.equals(readField(record, "mVisibleRequested"))) {
+                    Object result = callNoArg(record, "setVisibleRequested", Boolean.FALSE);
+                    if (Boolean.TRUE.equals(result)) {
+                        logOnce("rehide_" + entry.getKey() + "_" + reason,
+                                "task" + entry.getKey() + " rehide (" + reason + ")");
+                    }
+                }
+            } catch (Throwable t) {
+                XposedBridge.log(TAG + " rehide error: " + t.getMessage());
+            }
         }
-    }
-
-    /**
-     * 旋转 / 解锁 / 起新页面之后，把浮标任务收回 mini。
-     *
-     * 这里**不再**手工把 mVisibleRequested 压回 false：那样会让窗口和输入焦点脱节，
-     * 之后任何一个输入（比如调音量）都会 `Input dispatching timed out
-     * (Application does not have a focused window)`，应用被系统 ANR 杀掉。
-     * 改成走原厂的 switchState(task, 2)，状态由原厂自己维护。
-     */
-    private static void rehideTracked(String reason) {
-        miniRestoreTracked(reason);
     }
 
     // ==================== 锁屏/息屏期间不把浮标展开成全屏 ====================
@@ -652,7 +597,6 @@ final class FloatKeepAliveHook {
             protected void afterHookedMethod(MethodHookParam param) {
                 try {
                     if (!keepAliveEnabled()) return;
-                    if (param.thisObject != null) sFlexibleController = param.thisObject;
                     if (param.args.length < 4) return;
                     if (((Method) param.method).getReturnType() != Integer.TYPE) return;
                     Object targetTask = param.args[3];
@@ -704,10 +648,21 @@ final class FloatKeepAliveHook {
                             // 紧接着这一步，原厂会把 task 移到前台并摘掉浮标
                             // （FloatHandleController.moveTaskToFront → "goto removeFloatHandle"），
                             // 浮标就从 mini 变回 zoom，新页面以自由小窗的形态弹出来。
-                            // 记一个窗口期，让 moveTaskToFront 那条 hook 把这次「移出浮标」吃掉。
+                            // 记一个窗口期，让下面那个 hook 把这次「移出浮标」吃掉。
                             sSuppressFloatEjectAt = SystemClock.uptimeMillis() + 2500L;
-                            // 万一窗口还是被抬起来了，就用原厂 switchState 把它收回浮标。
-                            scheduleMiniRestore(sourceId);
+                            Handler handler = sHandler;
+                            if (handler != null) {
+                                handler.postDelayed(new Runnable() {
+                                    @Override
+                                    public void run() {
+                                        try {
+                                            rehideTracked("after_launch");
+                                        } catch (Throwable t) {
+                                            XposedBridge.log(TAG + " after launch rehide error: " + t.getMessage());
+                                        }
+                                    }
+                                }, 300);
+                            }
                         }
                     }
                 } catch (Throwable t) {
@@ -785,15 +740,13 @@ final class FloatKeepAliveHook {
                     int taskId = taskIdOfObject(task);
                     if (taskId <= 0 || !isFloating(taskId)) return;
                     if (SystemClock.uptimeMillis() < sSuppressFloatEjectAt) {
-                        // 浮标里的应用自己起新页面：这一步别摘浮标，否则 task 会从 mini 变回 zoom，
-                        // 官方自由小窗就跟着弹出来。
+                        // 应用自己起新页面：这次别移出浮标
                         param.setResult(null);
                         logOnce("eject_" + taskId,
-                                "task" + taskId + " 起新页面时不移出浮标（保留浮标）");
+                                "task" + taskId + " 起新页面时不移出浮标（保留浮标，不弹窗）");
                         return;
                     }
-                    logOnce("eject_" + taskId, "task" + taskId + " moveTaskToFront（用户打开途径）");
-                    // 其余情况（用户点浮标打开）记一个白名单窗口，收尾逻辑不去动它
+                    // 其余情况（用户点浮标打开）记一个白名单窗口，放行后面的可见性
                     sUserFloatOpenAt = SystemClock.uptimeMillis() + 2000L;
                 } catch (Throwable t) {
                     XposedBridge.log(TAG + " moveTaskToFront hook error: " + t.getMessage());
