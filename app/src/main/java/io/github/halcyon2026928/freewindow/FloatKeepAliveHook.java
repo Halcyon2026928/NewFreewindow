@@ -198,7 +198,7 @@ final class FloatKeepAliveHook {
             @Override
             protected void beforeHookedMethod(MethodHookParam param) {
                 try {
-                    if (param.args.length != 1) return;
+                    if (param.args.length < 1) return;
                     Object arg = param.args[0];
                     if (!(arg instanceof Boolean)) return;
                     boolean visible = ((Boolean) arg).booleanValue();
@@ -605,6 +605,21 @@ final class FloatKeepAliveHook {
                         }
                         if (sourcePkg instanceof String && sourcePkg.equals(startPkg)) {
                             param.setResult(Integer.valueOf(4));
+                            // 新页面照常在浮标 task 里起来，但任务不能因此变成可见的窗口。
+                            // 等它完成启动流程，再把浮标任务的可见性压回去。
+                            Handler handler = sHandler;
+                            if (handler != null) {
+                                handler.postDelayed(new Runnable() {
+                                    @Override
+                                    public void run() {
+                                        try {
+                                            rehideTracked("after_launch");
+                                        } catch (Throwable t) {
+                                            XposedBridge.log(TAG + " after launch rehide error: " + t.getMessage());
+                                        }
+                                    }
+                                }, 300);
+                            }
                         }
                     }
                 } catch (Throwable t) {
