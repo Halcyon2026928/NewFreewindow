@@ -86,6 +86,13 @@ final class FloatKeepAliveHook {
     private static final long[] ROTATION_CHECK_DELAYS_MS = {800L, 2000L, 4000L, 8000L};
     private static final long[] UNLOCK_CHECK_DELAYS_MS = {800L, 1600L, 2600L};
 
+    /**
+     * 把浮标任务收回 mini 的重试点。原厂 switchState 有多道保护
+     * （isAnimatingSwitchToZoom / inOrientationChanging / 自定义过渡类型），
+     * 刚弹窗那一刻经常会直接 return，所以要隔一段时间多试几次。
+     */
+    private static final long[] MINI_RESTORE_DELAYS_MS = {350L, 900L, 1700L, 2800L, 4200L};
+
     /** 复查 doze 白名单的时间间隔。 */
     private static final long EXEMPT_SWEEP_MS = 60000L;
 
@@ -504,25 +511,31 @@ final class FloatKeepAliveHook {
         if (taskId <= 0) return;
         Handler handler = sHandler;
         if (handler == null) return;
-        handler.postDelayed(new Runnable() {
-            @Override
-            public void run() {
-                try {
-                    if (!keepAliveEnabled()) return;
-                    // 用户主动点浮标打开：不动它。
-                    if (SystemClock.uptimeMillis() < sUserFloatOpenAt) return;
-                    Object controller = sFlexibleController;
-                    if (controller == null) return;
-                    Object task = taskObjectOf(taskId);
-                    if (task == null) return;
-                    callMethod(controller, "switchState", task, Integer.valueOf(2),
-                            "keepalive_restore_mini");
-                    logOnce("mini_" + taskId, "task" + taskId + " 收回到浮标（switchState=2）");
-                } catch (Throwable t) {
-                    XposedBridge.log(TAG + " mini restore error: " + t.getMessage());
+        for (int i = 0; i < MINI_RESTORE_DELAYS_MS.length; i++) {
+            final int attempt = i;
+            handler.postDelayed(new Runnable() {
+                @Override
+                public void run() {
+                    try {
+                        if (!keepAliveEnabled()) return;
+                        // 用户主动点浮标打开：别把用户的应用又按回浮标。
+                        if (SystemClock.uptimeMillis() < sUserFloatOpenAt) return;
+                        Object controller = sFlexibleController;
+                        if (controller == null) return;
+                        Object task = taskObjectOf(taskId);
+                        if (task == null) return;
+                        // 窗口已经不在（任务回到浮标形态）就不用再动。
+                        if (Boolean.FALSE.equals(callNoArg(task, "isVisible"))) return;
+                        callMethod(controller, "switchState", task, Integer.valueOf(2),
+                                "keepalive_restore_mini");
+                        logOnce("mini_" + taskId + "_" + attempt,
+                                "task" + taskId + " 收回到浮标（switchState=2，第" + (attempt + 1) + "次）");
+                    } catch (Throwable t) {
+                        XposedBridge.log(TAG + " mini restore error: " + t.getMessage());
+                    }
                 }
-            }
-        }, 350);
+            }, MINI_RESTORE_DELAYS_MS[i]);
+        }
     }
 
     /** 从 taskId 反查原厂的 Task 对象。 */
@@ -691,21 +704,10 @@ final class FloatKeepAliveHook {
                             // 紧接着这一步，原厂会把 task 移到前台并摘掉浮标
                             // （FloatHandleController.moveTaskToFront → "goto removeFloatHandle"），
                             // 浮标就从 mini 变回 zoom，新页面以自由小窗的形态弹出来。
-                            // 记一个窗口期，让下面那个 hook 把这次「移出浮标」吃掉。
+                            // 记一个窗口期，让 moveTaskToFront 那条 hook 把这次「移出浮标」吃掉。
                             sSuppressFloatEjectAt = SystemClock.uptimeMillis() + 2500L;
-                            Handler handler = sHandler;
-                            if (handler != null) {
-                                handler.postDelayed(new Runnable() {
-                                    @Override
-                                    public void run() {
-                                        try {
-                                            rehideTracked("after_launch");
-                                        } catch (Throwable t) {
-                                            XposedBridge.log(TAG + " after launch rehide error: " + t.getMessage());
-                                        }
-                                    }
-                                }, 300);
-                            }
+                            // 万一窗口还是被抬起来了，就用原厂 switchState 把它收回浮标。
+                            scheduleMiniRestore(sourceId);
                         }
                     }
                 } catch (Throwable t) {
@@ -782,8 +784,16 @@ final class FloatKeepAliveHook {
                     if (task == null) return;
                     int taskId = taskIdOfObject(task);
                     if (taskId <= 0 || !isFloating(taskId)) return;
-                    logOnce("eject_" + taskId, "task" + taskId + " moveTaskToFront（原厂会把浮标换成小窗）");
-                    // 其余情况（用户点浮标打开）记一个白名单窗口，放行后面的可见性
+                    if (SystemClock.uptimeMillis() < sSuppressFloatEjectAt) {
+                        // 浮标里的应用自己起新页面：这一步别摘浮标，否则 task 会从 mini 变回 zoom，
+                        // 官方自由小窗就跟着弹出来。
+                        param.setResult(null);
+                        logOnce("eject_" + taskId,
+                                "task" + taskId + " 起新页面时不移出浮标（保留浮标）");
+                        return;
+                    }
+                    logOnce("eject_" + taskId, "task" + taskId + " moveTaskToFront（用户打开途径）");
+                    // 其余情况（用户点浮标打开）记一个白名单窗口，收尾逻辑不去动它
                     sUserFloatOpenAt = SystemClock.uptimeMillis() + 2000L;
                 } catch (Throwable t) {
                     XposedBridge.log(TAG + " moveTaskToFront hook error: " + t.getMessage());
