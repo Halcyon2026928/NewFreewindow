@@ -550,6 +550,45 @@ final class FloatKeepAliveHook {
             }
         });
         if (!hooked) XposedBridge.log(TAG + " isAllowedToAdjustOptions not hooked");
+
+        /*
+         * 更彻底的兜底：apply「应用自己在浮标里起页面 → 整个跳过浮动 options 调整」。
+         *
+         * 首页换集 / 点「观看完整短剧」这类跳转，红果会把新页面放到另一个 task 上，
+         * 上面那条「同 task」判定就不成立；原厂于是照样把新 task 摆成浮动小窗、浮标随之展开。
+         * adjustOptionsForFlexibleTask 是所有启动都要过的口子，且入参就是调用方的原始 options：
+         * 在 before 阶段直接按原 options 返回，等价于「本次不调整」，新页面留在原 task 里继续跑。
+         *
+         * 只认「来源是保活浮标 task 且新页面还是同一个应用」的内部跳转；
+         * 跨应用（分享、跳浏览器等）保持原厂处理。
+         */
+        boolean hookedAll = hookAllSafe(flexibleClass, "adjustOptionsForFlexibleTask", new XC_MethodHook() {
+            @Override
+            protected void beforeHookedMethod(MethodHookParam param) {
+                try {
+                    if (!keepAliveEnabled()) return;
+                    if (param.args.length < 5) return;
+                    Object rawOptions = param.args[2];
+                    Object startActivity = param.args[3];
+                    Object sourceRecord = param.args[4];
+                    if (startActivity == null || sourceRecord == null) return;
+                    Object sourceTask = readField(sourceRecord, "task");
+                    if (sourceTask == null) sourceTask = readField(sourceRecord, "mTask");
+                    int taskId = taskIdOfObject(sourceTask);
+                    if (taskId <= 0 || !isFloating(taskId)) return;
+                    Object sourcePkg = readField(sourceRecord, "packageName");
+                    Object startPkg = readField(startActivity, "packageName");
+                    if (!(sourcePkg instanceof String) || !(startPkg instanceof String)) return;
+                    if (!sourcePkg.equals(startPkg)) return;
+                    logOnce("floatjump_" + taskId,
+                            "task" + taskId + " 浮标内起新页面（" + startPkg + "），保持原样不排小窗");
+                    param.setResult(rawOptions);
+                } catch (Throwable t) {
+                    XposedBridge.log(TAG + " adjustOptionsForFlexibleTask hook error: " + t.getMessage());
+                }
+            }
+        });
+        if (!hookedAll) XposedBridge.log(TAG + " adjustOptionsForFlexibleTask not hooked");
     }
 
     private static boolean isLockedOrOff(Object controller) {
