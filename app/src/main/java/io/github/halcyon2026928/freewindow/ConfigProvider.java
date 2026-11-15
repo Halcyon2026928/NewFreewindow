@@ -33,6 +33,10 @@ public class ConfigProvider extends ContentProvider {
                 prefs.getBoolean(SettingsActivity.KEY_ENABLE_DOCK, true) ? 1 : 0});
         c.addRow(new Object[]{SettingsActivity.KEY_KEEP_ALIVE,
                 prefs.getBoolean(SettingsActivity.KEY_KEEP_ALIVE, true) ? 1 : 0});
+        c.addRow(new Object[]{SettingsActivity.KEY_AUTO_WIRELESS_ADB,
+                prefs.getBoolean(SettingsActivity.KEY_AUTO_WIRELESS_ADB, false) ? 1 : 0});
+        c.addRow(new Object[]{SettingsActivity.KEY_UNLOCK_LIMIT,
+                prefs.getBoolean(SettingsActivity.KEY_UNLOCK_LIMIT, true) ? 1 : 0});
         return c;
     }
 

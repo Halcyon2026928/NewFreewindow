@@ -2,8 +2,11 @@ package io.github.halcyon2026928.freewindow;
 
 import android.app.Activity;
 import android.content.Context;
+import android.graphics.Color;
+import android.os.Build;
 import android.os.Bundle;
 import android.view.View;
+import android.view.Window;
 import android.widget.CompoundButton;
 import android.widget.ImageView;
 import android.widget.Switch;
@@ -18,8 +21,12 @@ public class SettingsActivity extends Activity {
     public static final String KEY_HIDE_BOTTOM_BAR = "hide_bottom_bar";
     public static final String KEY_HIDE_THREE_DOT = "hide_three_dot_menu";
     public static final String KEY_ENABLE_DOCK = "enable_float_dock";
+    /** 解除自由小窗数量上限（官方 2 个 → 12 个），与 MainHook 的 unlock_float_limit 一致。 */
+    public static final String KEY_UNLOCK_LIMIT = "unlock_float_limit";
     /** 贴边保活开关，与 FloatKeepAliveHook 读取的键一致。 */
     public static final String KEY_KEEP_ALIVE = FloatKeepAliveHook.KEY_KEEP_ALIVE;
+    /** 开发者选项：开机自动打开系统「无线调试」，与 WirelessAdbAuto 一致。 */
+    public static final String KEY_AUTO_WIRELESS_ADB = WirelessAdbAuto.KEY;
 
     private static final String UI_PREFS = "ui_prefs";
     private static final String KEY_LIGHT_THEME = "light_theme";
@@ -28,6 +35,8 @@ public class SettingsActivity extends Activity {
     private Switch threeDotSwitch;
     private Switch dockSwitch;
     private Switch keepAliveSwitch;
+    private Switch autoWirelessAdbSwitch;
+    private Switch unlockLimitSwitch;
     private boolean syncing = false;
 
     @Override
@@ -36,6 +45,7 @@ public class SettingsActivity extends Activity {
         final boolean light = isLightTheme();
         setTheme(light ? R.style.LightTheme : R.style.AppTheme);
         setContentView(R.layout.activity_settings);
+        applyImmersiveStatusBar(light);
 
         View btnTheme = findViewById(R.id.btnTheme);
         ImageView ivThemeIcon = findViewById(R.id.ivThemeIcon);
@@ -53,6 +63,8 @@ public class SettingsActivity extends Activity {
         threeDotSwitch = findViewById(R.id.switch_three_dot);
         dockSwitch = findViewById(R.id.switch_dock);
         keepAliveSwitch = findViewById(R.id.switch_keep_alive);
+        autoWirelessAdbSwitch = findViewById(R.id.switch_auto_wireless_adb);
+        unlockLimitSwitch = findViewById(R.id.switch_unlock_limit);
 
         syncFromPrefs();
 
@@ -84,6 +96,89 @@ public class SettingsActivity extends Activity {
                 writePref(KEY_KEEP_ALIVE, isChecked);
             }
         });
+        autoWirelessAdbSwitch.setOnCheckedChangeListener(new CompoundButton.OnCheckedChangeListener() {
+            @Override
+            public void onCheckedChanged(CompoundButton buttonView, boolean isChecked) {
+                if (syncing) return;
+                writePref(KEY_AUTO_WIRELESS_ADB, isChecked);
+            }
+        });
+        unlockLimitSwitch.setOnCheckedChangeListener(new CompoundButton.OnCheckedChangeListener() {
+            @Override
+            public void onCheckedChanged(CompoundButton buttonView, boolean isChecked) {
+                if (syncing) return;
+                writePref(KEY_UNLOCK_LIMIT, isChecked);
+            }
+        });
+    }
+
+    /**
+     * 状态栏沉浸：状态栏背景透明、渐变背景一直铺到屏幕顶端，
+     * 内容用 padding 往下让出状态栏高度，标题不会被时间/电量压住。
+     * 浅色主题要把图标刷成深色，否则白底上看不见。
+     */
+    private void applyImmersiveStatusBar(boolean light) {
+        try {
+            Window window = getWindow();
+            window.addFlags(android.view.WindowManager.LayoutParams.FLAG_DRAWS_SYSTEM_BAR_BACKGROUNDS);
+            // 状态栏 + 导航栏都透明，渐变背景从屏幕顶端一直铺到底部，不留灰边
+            window.setStatusBarColor(Color.TRANSPARENT);
+            window.setNavigationBarColor(Color.TRANSPARENT);
+            int flags = View.SYSTEM_UI_FLAG_LAYOUT_STABLE
+                    | View.SYSTEM_UI_FLAG_LAYOUT_FULLSCREEN
+                    | View.SYSTEM_UI_FLAG_LAYOUT_HIDE_NAVIGATION;
+            if (light && Build.VERSION.SDK_INT >= 23) {
+                flags |= View.SYSTEM_UI_FLAG_LIGHT_STATUS_BAR;
+            }
+            if (light && Build.VERSION.SDK_INT >= 26) {
+                flags |= View.SYSTEM_UI_FLAG_LIGHT_NAVIGATION_BAR;
+            }
+            window.getDecorView().setSystemUiVisibility(flags);
+        } catch (Throwable ignored) {
+            // 沉浸失败就退回主题里写死的状态栏颜色，不影响使用
+        }
+
+        final View root = findViewById(R.id.root);
+        if (root == null) return;
+        final View scroll = findViewById(R.id.scroll);
+        final int base = (int) (20 * getResources().getDisplayMetrics().density);
+        // 底部不留内边距：背景一路铺到最底，滚动容器自己也到底。
+        // 但最后一张卡片要能完整滚出来，所以把导航栏高度让给 ScrollView 的内容区
+        // （clipToPadding=false，滚动条区域不裁内容，视觉上仍然没有空白带）。
+        View.OnApplyWindowInsetsListener listener = new View.OnApplyWindowInsetsListener() {
+            @Override
+            public android.view.WindowInsets onApplyWindowInsets(View v,
+                                                                   android.view.WindowInsets insets) {
+                int top = insets.getSystemWindowInsetTop();
+                int bottom = insets.getSystemWindowInsetBottom();
+                if (top <= 0) top = statusBarHeight();
+                v.setPadding(base, base + top, base, 0);
+                if (scroll != null) {
+                    scroll.setPadding(0, 0, 0, bottom);
+                }
+                return insets;
+            }
+        };
+        root.setOnApplyWindowInsetsListener(listener);
+        root.requestApplyInsets();
+        // 保险：insets 偶尔不来（部分 ROM 在首帧之后才下发），这里先按资源值摆一次。
+        root.setPadding(base, base + statusBarHeight(), base, 0);
+        if (scroll != null) {
+            scroll.setPadding(0, 0, 0, navigationBarHeight());
+        }
+    }
+
+    private int statusBarHeight() {
+        return systemDimen("status_bar_height");
+    }
+
+    private int navigationBarHeight() {
+        return systemDimen("navigation_bar_height");
+    }
+
+    private int systemDimen(String name) {
+        int id = getResources().getIdentifier(name, "dimen", "android");
+        return id > 0 ? getResources().getDimensionPixelSize(id) : 0;
     }
 
     private void syncFromPrefs() {
@@ -92,6 +187,8 @@ public class SettingsActivity extends Activity {
         threeDotSwitch.setChecked(readPref(KEY_HIDE_THREE_DOT, true));
         dockSwitch.setChecked(readPref(KEY_ENABLE_DOCK, true));
         keepAliveSwitch.setChecked(readPref(KEY_KEEP_ALIVE, true));
+        autoWirelessAdbSwitch.setChecked(readPref(KEY_AUTO_WIRELESS_ADB, false));
+        unlockLimitSwitch.setChecked(readPref(KEY_UNLOCK_LIMIT, true));
         syncing = false;
     }
 

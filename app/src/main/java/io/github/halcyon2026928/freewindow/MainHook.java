@@ -5,15 +5,19 @@ import android.content.Context;
 import android.content.pm.ApplicationInfo;
 import android.content.pm.PackageManager;
 import android.database.Cursor;
+import android.graphics.Bitmap;
 import android.graphics.PixelFormat;
 import android.graphics.Rect;
 import android.graphics.Region;
 import android.graphics.drawable.GradientDrawable;
 import android.os.Build;
 import android.os.Handler;
+import android.os.Looper;
+import android.util.DisplayMetrics;
 import android.util.TypedValue;
 import android.view.Gravity;
 import android.view.MotionEvent;
+import android.view.SurfaceView;
 import android.view.View;
 import android.view.ViewGroup;
 import android.view.WindowManager;
@@ -40,10 +44,15 @@ public class MainHook implements IXposedHookLoadPackage {
 
     private static final String TAG = "[freewindow-hook]";
 
+    /** 解除后允许同时存在的自由小窗数量（系统默认只有 2）。 */
+    private static final int MAX_FLOAT_HANDLE_COUNT = 12;
+
     /** 配置在模块 app 的 SharedPreferences 中（与 SettingsActivity 一致），经 ConfigProvider 暴露。 */
     private static final String KEY_HIDE_BOTTOM_BAR = "hide_bottom_bar";
     private static final String KEY_HIDE_THREE_DOT = "hide_three_dot_menu";
     private static final String KEY_ENABLE_DOCK = "enable_float_dock";
+    /** 解除自由小窗数量上限的开关（关掉就退回系统默认的 2 个）。 */
+    private static final String KEY_UNLOCK_LIMIT = "unlock_float_limit";
 
     /** 设为 true 时会把 FlexibleTaskCaptionView 的完整视图树打印到 Xposed 日志，便于在真机上确认三点按钮的确切 id。 */
     private static final boolean DUMP_CAPTION_TREE = false;
@@ -53,6 +62,8 @@ public class MainHook implements IXposedHookLoadPackage {
     private boolean hideBottomBar = true;
     private boolean hideThreeDot = true;
     private boolean enableDock = true;
+    /** 解除数量上限开关；关掉时上限 hook 一个都不装，系统保持官方 2 个。 */
+    private boolean unlockFloatLimit = true;
     private boolean configLoaded = false;
 
     /** 系统框架 ClassLoader。 */
@@ -76,6 +87,29 @@ public class MainHook implements IXposedHookLoadPackage {
     private static final List<Object> sDockApps = new ArrayList<>();
     /** 坞窗是否正在显示。 */
     private static boolean sDockShowing = false;
+    /** 坞窗当前是按横屏还是竖屏布局建的：屏幕旋转时用它判断要不要重建。 */
+    private static boolean sDockLandscape = false;
+    /** 建坞窗时用的 FloatHandleInfo，旋转重建时原样传回去（决定弹出侧）。 */
+    private static Object sDockInfo;
+    /** 方向轮询是否已在跑（坞窗存活期间每秒一次）。 */
+    private static volatile boolean sOrientationWatch = false;
+    private static final long ORIENTATION_CHECK_MS = 1000L;
+    /** 还没抓到快照时，卡片画面先按 16:9 占位；抓到之后按快照真实比例建框。 */
+    private static final float PREVIEW_ASPECT_FALLBACK = 1.7778f;
+    /**
+     * 固定画面比例：打开后卡片画面不再跟快照真实比例走，任何应用、任何转屏都用同一个比例。
+     * 竖屏 16:9、横屏 13:9，与系统自由小窗的两个默认比例（1.7777778f / 1.4444444f）一致。
+     * 画面内容仍按等比居中绘制：快照比框长就左右留边（露出坞窗底色），比框短就上下留边，不会变形。
+     * 需要回退成「按快照真实比例」把这里改成 false 即可。
+     */
+    private static final boolean FIXED_PREVIEW_ASPECT = true;
+    private static final float PREVIEW_ASPECT_PORTRAIT = 16f / 9f;    // 1.7778
+    private static final float PREVIEW_ASPECT_LANDSCAPE = 13f / 9f;   // 1.4444
+    /**
+     * 横屏应用单独一条：它的画面本身是横的，按 9:16（高:宽 = 0.5625）建一个矮框，
+     * 画面正好横向铺满，不会像竖框那样把横屏内容切成一条竖缝。
+     */
+    private static final float PREVIEW_ASPECT_LANDSCAPE_APP = 9f / 16f;  // 0.5625
     /** 我们自己正在走官方恢复路径：此时放行 startFlexibleFreeformFromHandleView，别再弹坞窗。 */
     private static volatile boolean sRestoring = false;
 
@@ -118,12 +152,15 @@ public class MainHook implements IXposedHookLoadPackage {
                             hideThreeDot = value == 1;
                         } else if (KEY_ENABLE_DOCK.equals(key)) {
                             enableDock = value == 1;
+                        } else if (KEY_UNLOCK_LIMIT.equals(key)) {
+                            unlockFloatLimit = value == 1;
                         }
                     }
                     configLoaded = true;
                     XposedBridge.log(TAG + " config(provider) -> hideBottomBar=" + hideBottomBar
                             + " hideThreeDot=" + hideThreeDot
-                            + " enableDock=" + enableDock);
+                            + " enableDock=" + enableDock
+                            + " unlockFloatLimit=" + unlockFloatLimit);
                 } finally {
                     c.close();
                 }
@@ -143,22 +180,256 @@ public class MainHook implements IXposedHookLoadPackage {
             hideBottomBar = prefs.getBoolean(KEY_HIDE_BOTTOM_BAR, true);
             hideThreeDot = prefs.getBoolean(KEY_HIDE_THREE_DOT, true);
             enableDock = prefs.getBoolean(KEY_ENABLE_DOCK, true);
+            unlockFloatLimit = prefs.getBoolean(KEY_UNLOCK_LIMIT, true);
             configLoaded = true;
             XposedBridge.log(TAG + " config(xprefs readable=" + prefs.getFile().canRead()
                     + ") -> hideBottomBar=" + hideBottomBar
                     + " hideThreeDot=" + hideThreeDot
-                    + " enableDock=" + enableDock);
+                    + " enableDock=" + enableDock
+                    + " unlockFloatLimit=" + unlockFloatLimit);
         } catch (Throwable t) {
             XposedBridge.log(TAG + " XSharedPreferences error: " + t.getMessage());
         }
     }
 
     private void hookSystemServer(XC_LoadPackage.LoadPackageParam lpparam) {
+        // 先把开关读进来：数量上限的 hook 装不装由 unlock_float_limit 决定，
+        // 所以必须在装机（重启）那一刻就知道开关状态。
+        try {
+            loadFromXSharedPrefs();
+        } catch (Throwable t) {
+            XposedBridge.log(TAG + " load config before hook failed: " + t.getMessage());
+        }
+
         // 贴边保活：与 GUI 装饰项彼此独立，先装；失败不影响后续 hook。
         try {
             FloatKeepAliveHook.install(lpparam.classLoader);
         } catch (Throwable t) {
             XposedBridge.log(TAG + " FloatKeepAliveHook install failed: " + t.getMessage());
+        }
+
+        // 开发者选项：开机首次解锁后自动打开系统「无线调试」。
+        try {
+            WirelessAdbAuto.install(lpparam.classLoader);
+        } catch (Throwable t) {
+            XposedBridge.log(TAG + " WirelessAdbAuto install failed: " + t.getMessage());
+        }
+
+        // 解除「自由小窗 / 迷你浮窗」的数量上限（系统默认 2）。
+        // 两个机型限制落点不同：
+        //   5200(Android 17 / ColorOS 17)：FloatHandleController.getLimitMaxFloatNum() 读字段 mLimitMaxFloatNum；
+        //   3820(Android 16 / realme UI 7)：没有该方法，LIMIT_FLOAT_NUM = 2 被内联进 updateInfoMapForAdd
+        //     （size == 2 时直接把第一个挤掉），所以必须接管这个方法。
+        // 两条 hook 各自独立 try：一条找不到不能拖垮另一条。
+        Class<?> fhcCls = null;
+        try {
+            fhcCls = XposedHelpers.findClass(
+                    "com.android.server.wm.FloatHandleController", lpparam.classLoader);
+        } catch (Throwable t) {
+            XposedBridge.log(TAG + " FloatHandleController not found: " + t.getMessage());
+        }
+
+        if (fhcCls != null && !unlockFloatLimit) {
+            // 开关关掉：一条上限 hook 都不装，系统完全保持官方「最多 2 个」的行为。
+            XposedBridge.log(TAG + " float limit unlock disabled by switch -> keep system default 2");
+        }
+        if (fhcCls != null && unlockFloatLimit) {
+            // 5200 走这条：把上限字段顶到大值。
+            boolean getterHooked = false;
+            try {
+                XposedHelpers.findAndHookMethod(fhcCls, "getLimitMaxFloatNum", new XC_MethodHook() {
+                    @Override
+                    protected void afterHookedMethod(MethodHookParam param) {
+                        param.setResult(MAX_FLOAT_HANDLE_COUNT);
+                    }
+                });
+                getterHooked = true;
+                XposedBridge.log(TAG + " float limit getter hooked");
+            } catch (Throwable t) {
+                XposedBridge.log(TAG + " float limit getter missing (ok on A16): " + t.getMessage());
+            }
+            try {
+                XposedBridge.hookAllConstructors(fhcCls, new XC_MethodHook() {
+                    @Override
+                    protected void afterHookedMethod(MethodHookParam param) {
+                        try {
+                            XposedHelpers.setIntField(param.thisObject, "mLimitMaxFloatNum", MAX_FLOAT_HANDLE_COUNT);
+                        } catch (Throwable t) {
+                            XposedBridge.log(TAG + " float limit field set failed: " + t.getMessage());
+                        }
+                    }
+                });
+            } catch (Throwable t) {
+                XposedBridge.log(TAG + " float limit ctor hook failed: " + t.getMessage());
+            }
+
+            // 只有 getter 不存在（3820 / Android 16）时才接管插入点。
+            // 5200 那种有 getter 的机型上限已被顶到 10，原生逻辑不会再挤掉旧条目，
+            // 保留原方法还能继续跑它自己的 UI 通知（notifyItemInserted），不必也不该替它决定。
+            // 注意：不能用 findAndHookMethod 传字符串参数类型 —— Xposed 的 getParameterClasses
+            // 会把 "com.android.server.wm.FloatHandleInfo" 的 '.' 换成 '$'，直接 ClassNotFound。
+            // 按方法名枚举方法本身，完全不碰参数类型解析。
+            if (!getterHooked) try {
+                XC_MethodHook addHook = new XC_MethodHook() {
+                    @Override
+                    protected void beforeHookedMethod(MethodHookParam param) {
+                        try {
+                            Object info = param.args[0];
+                            Object listObj = XposedHelpers.getObjectField(
+                                    param.thisObject, "mFloatHandleInfoList");
+                            if (info != null && listObj instanceof java.util.List) {
+                                java.util.List list = (java.util.List) listObj;
+                                synchronized (list) {
+                                    // 按 taskId 去重（FloatHandleInfo 的 equals 不可靠）
+                                    int newTaskId = XposedHelpers.getIntField(info, "taskId");
+                                    boolean exists = false;
+                                    for (Object o : list) {
+                                        try {
+                                            if (XposedHelpers.getIntField(o, "taskId") == newTaskId) {
+                                                exists = true;
+                                                break;
+                                            }
+                                        } catch (Throwable ignored) {
+                                            // 字段读不到就跳过这一条
+                                        }
+                                    }
+                                    if (!exists) {
+                                        list.add(info);
+                                    }
+                                    XposedBridge.log(TAG + " float handle add, size=" + list.size()
+                                            + " taskId=" + newTaskId + (exists ? " (already present)" : " (limit bypassed)"));
+                                }
+                            }
+                            try {
+                                int uid = (Integer) XposedHelpers.callMethod(info, "getUserId");
+                                String pkg = (String) XposedHelpers.callMethod(info, "getPackageName");
+                                XposedHelpers.callMethod(param.thisObject, "updateFloatLockListApp",
+                                        pkg + "#" + uid, null, uid);
+                            } catch (Throwable ignored) {
+                                // 锁列表记账失败不影响解除上限
+                            }
+                            param.setResult(null);
+                        } catch (Throwable t) {
+                            XposedBridge.log(TAG + " float limit bypass failed: " + t.getMessage());
+                        }
+                    }
+                };
+                int hooked = 0;
+                for (Method m : fhcCls.getDeclaredMethods()) {
+                    if (!"updateInfoMapForAdd".equals(m.getName())) {
+                        continue;
+                    }
+                    XposedBridge.hookMethod(m, addHook);
+                    hooked++;
+                    XposedBridge.log(TAG + " float limit insert hooked: " + m);
+                }
+                if (hooked == 0) {
+                    XposedBridge.log(TAG + " float limit insert hook: method not found");
+                } else {
+                    XposedBridge.log(TAG + " float handle limit removed -> " + MAX_FLOAT_HANDLE_COUNT);
+                }
+            } catch (Throwable t) {
+                XposedBridge.log(TAG + " float limit insert hook failed: " + t.getMessage());
+            }
+
+            // 解除上限的第三个硬编码点：removeFloatHandleInner 只写了 size==1 / size==2，
+            // size>=3 落到 else 打一行 "mFloatHandler removeFloatHandle ERROR" 直接返回，
+            // 于是坞窗里的「清除」「取消运行」全都关不掉小窗（日志里 size 一直停在 3）。
+            // 做法不去改它的判断，而是把列表临时收成「目标 + 一个陪衬」交给原方法：
+            // 原方法按 size==2 分支正常 copy / remove / exitMinimize / 刷 UI，其余条目在
+            // after 里补回列表，最终净减一项，且完全走系统自己的移除通路。
+            if (!getterHooked) try {
+                XposedHelpers.findAndHookMethod(fhcCls, "removeFloatHandleInner",
+                        int.class, boolean.class, int.class,
+                        new XC_MethodHook() {
+                            @Override
+                            protected void beforeHookedMethod(MethodHookParam param) {
+                                try {
+                                    Object listObj = XposedHelpers.getObjectField(
+                                            param.thisObject, "mFloatHandleInfoList");
+                                    if (!(listObj instanceof List)) {
+                                        return;
+                                    }
+                                    List list = (List) listObj;
+                                    int taskId = (Integer) param.args[0];
+                                    synchronized (list) {
+                                        if (list.size() < 3) {
+                                            return;
+                                        }
+                                        Object target = null;
+                                        Object mate = null;
+                                        for (Object o : list) {
+                                            int tid = (Integer) XposedHelpers.callMethod(o, "getTaskId");
+                                            if (tid == taskId) {
+                                                target = o;
+                                                break;
+                                            }
+                                            if (mate == null) {
+                                                mate = o;
+                                            }
+                                        }
+                                        if (target == null) {
+                                            return;
+                                        }
+                                        if (mate == null) {
+                                            mate = list.get(0) == target ? list.get(1) : list.get(0);
+                                        }
+                                        List saved = new ArrayList();
+                                        for (Object o : list) {
+                                            if (o != mate && o != target) {
+                                                saved.add(o);
+                                            }
+                                        }
+                                        list.clear();
+                                        list.add(mate);
+                                        list.add(target);
+                                        param.setObjectExtra("fw_saved", saved);
+                                        XposedBridge.log(TAG + " removeFloatHandle trimmed list for size>2,"
+                                                + " saved=" + saved.size() + " taskId=" + taskId);
+                                    }
+                                } catch (Throwable t) {
+                                    XposedBridge.log(TAG + " removeFloatHandle trim error: " + t.getMessage());
+                                }
+                            }
+
+                            @Override
+                            protected void afterHookedMethod(MethodHookParam param) {
+                                Object saved = param.getObjectExtra("fw_saved");
+                                if (!(saved instanceof List)) {
+                                    return;
+                                }
+                                try {
+                                    Object listObj = XposedHelpers.getObjectField(
+                                            param.thisObject, "mFloatHandleInfoList");
+                                    if (!(listObj instanceof List)) {
+                                        return;
+                                    }
+                                    List list = (List) listObj;
+                                    synchronized (list) {
+                                        for (Object o : (List) saved) {
+                                            int tid = (Integer) XposedHelpers.callMethod(o, "getTaskId");
+                                            boolean present = false;
+                                            for (Object q : list) {
+                                                if ((Integer) XposedHelpers.callMethod(q, "getTaskId") == tid) {
+                                                    present = true;
+                                                    break;
+                                                }
+                                            }
+                                            if (!present) {
+                                                list.add(o);
+                                            }
+                                        }
+                                        XposedBridge.log(TAG + " removeFloatHandle restored, size=" + list.size());
+                                    }
+                                } catch (Throwable t) {
+                                    XposedBridge.log(TAG + " removeFloatHandle restore error: " + t.getMessage());
+                                }
+                            }
+                        });
+                XposedBridge.log(TAG + " removeFloatHandle multi-float hook success");
+            } catch (Throwable t) {
+                XposedBridge.log(TAG + " removeFloatHandle multi-float hook failed: " + t.getMessage());
+            }
         }
 
         // 单应用静音要用 AudioService 实例：LocalServices 查不到时靠构造期 hook 兜底。
@@ -587,6 +858,131 @@ public class MainHook implements IXposedHookLoadPackage {
                         }
                     });
             XposedBridge.log(TAG + " FloatHandleView click hook success");
+
+            // 解除小窗数量上限后的配套修补：系统 onSingleTapUp 只写了 size==2 / size==1 两条分支，
+            // 三个以上既不切双图标模式、也不调 startFlexibleFreeformFromHandleView，
+            // 直接把点击吞掉 —— 表现就是「悬浮球点不动、坞窗也不弹」。
+            // 这里给 3 个以上补一条通路：仍然走 startFlexibleFreeformFromHandleView，
+            // 由上面的 hook 拦成我们自己的坞窗（不真的把小窗拉起来）。
+            XposedHelpers.findAndHookMethod(fhvClass, "onSingleTapUp", MotionEvent.class,
+                    new XC_MethodHook() {
+                        @Override
+                        protected void beforeHookedMethod(MethodHookParam param) {
+                            try {
+                                Object view = param.thisObject;
+                                Object listObj = XposedHelpers.callMethod(view, "getFloatHandleInfoList");
+                                if (!(listObj instanceof List)) {
+                                    return;
+                                }
+                                List list = (List) listObj;
+                                if (list.size() < 3) {
+                                    return;
+                                }
+                                if (sDockContainer != null || sDockShowing) {
+                                    // 坞窗已经在显示（或正在显示），这次点击直接吞掉
+                                    param.setResult(true);
+                                    return;
+                                }
+                                XposedBridge.log(TAG + " onSingleTapUp multi-float size=" + list.size());
+                                XposedHelpers.callMethod(view, "startFlexibleFreeformFromHandleView",
+                                        list.get(0), "onSingleTapUp-MultiFloat");
+                                param.setResult(true);
+                            } catch (Throwable t) {
+                                XposedBridge.log(TAG + " multi-float tap hook error: " + t.getMessage());
+                            }
+                        }
+                    });
+            XposedBridge.log(TAG + " FloatHandleView multi-float tap hook success");
+
+            // 悬浮球只显示「最新最小化的那一个」，不做官方那种双图标堆叠。
+            // FloatHandleView.updateIconStyle() 里：size==1 只画第一图标；size==2 把 get(1)
+            // 画在第一图标、get(0) 画在第二图标（所以「越靠列表尾部越新」）；size>=3 干脆两个都不画。
+            // View 的 getFloatHandleInfoList() 返回的是 List.copyOf(...) 拷贝，替换返回值不会污染
+            // 控制器的真实列表，所以这里把 View 看到的列表裁成「只剩最后一项」：
+            // 布局、点击、动画全部自动退回单图标那一套，坞窗仍然拿全量列表显示所有卡片。
+            XposedHelpers.findAndHookMethod(fhvClass, "getFloatHandleInfoList", new XC_MethodHook() {
+                @Override
+                protected void afterHookedMethod(MethodHookParam param) {
+                    try {
+                        Object res = param.getResult();
+                        if (!(res instanceof List)) {
+                            return;
+                        }
+                        List src = (List) res;
+                        if (src.size() < 2) {
+                            return;
+                        }
+                        Object newest = src.get(src.size() - 1);
+                        if (newest == null) {
+                            return;
+                        }
+                        List single = new ArrayList();
+                        single.add(newest);
+                        param.setResult(single);
+                    } catch (Throwable t) {
+                        XposedBridge.log(TAG + " single icon hook error: " + t.getMessage());
+                    }
+                }
+            });
+            XposedBridge.log(TAG + " FloatHandleView single-icon hook success");
+
+            // 5200(Android 17 / ColorOS 17) 走的是另一套：图标不是一次性排好，而是
+            // FloatIconListAdapter.addFloatIconViewInfo 增量插入，只有
+            // 「size == getLimitMaxFloatNum()」时才挤掉最后一个。上限被我们顶到 12 之后，
+            // 2~11 个最小化应用就会全堆在悬浮球上（5200 看到的堆叠就是这个）。
+            // 这里直接接管：每来一个新图标就重置成「只有它一个」。
+            // 3820 没有这个类，findClass 失败会被 catch 掉，不影响原逻辑。
+            try {
+                Class<?> adapterCls = XposedHelpers.findClass(
+                        "com.android.server.wm.floathandle.FloatHandleView$FloatIconListAdapter", cl);
+                XposedBridge.hookAllMethods(adapterCls, "addFloatIconViewInfo", new XC_MethodHook() {
+                    @Override
+                    protected void beforeHookedMethod(MethodHookParam param) {
+                        try {
+                            Object info = param.args[0];
+                            if (info == null) {
+                                return;
+                            }
+                            ArrayList one = new ArrayList();
+                            one.add(info);
+                            XposedHelpers.callMethod(param.thisObject,
+                                    "setFloatIconViewInfoList", one);
+                            XposedHelpers.callMethod(param.thisObject, "notifyDataSetChanged");
+                            param.setResult(true);
+                        } catch (Throwable t) {
+                            XposedBridge.log(TAG + " single-icon adapter add error: " + t.getMessage());
+                        }
+                    }
+                });
+                // 兜底：不是走 add 的情况（批量 set / 重排）也可能留下多个图标，
+                // updateIconStyle 结束时再看一眼适配器，多于一个就只留最新的那个。
+                XposedBridge.hookAllMethods(fhvClass, "updateIconStyle", new XC_MethodHook() {
+                    @Override
+                    protected void afterHookedMethod(MethodHookParam param) {
+                        try {
+                            Object adapter = XposedHelpers.getObjectField(
+                                    param.thisObject, "mIconListAdapter");
+                            if (adapter == null) return;
+                            Object listObj = XposedHelpers.getObjectField(
+                                    adapter, "mFloatIconViewInfoList");
+                            if (!(listObj instanceof List)) return;
+                            List icons = (List) listObj;
+                            if (icons.size() <= 1) return;
+                            Object keep = icons.get(0);
+                            ArrayList one = new ArrayList();
+                            one.add(keep);
+                            XposedHelpers.callMethod(adapter, "setFloatIconViewInfoList", one);
+                            XposedHelpers.callMethod(adapter, "notifyDataSetChanged");
+                            XposedBridge.log(TAG + " single-icon trim: " + icons.size() + " -> 1");
+                        } catch (Throwable t) {
+                            XposedBridge.log(TAG + " single-icon trim error: " + t.getMessage());
+                        }
+                    }
+                });
+                XposedBridge.log(TAG + " FloatIconListAdapter single-icon hooks success");
+            } catch (Throwable t) {
+                XposedBridge.log(TAG + " FloatIconListAdapter hook skipped: " + t.getMessage());
+            }
         } catch (Throwable t) {
             XposedBridge.log(TAG + " hookFloatHandleClick failed: " + t.getMessage());
         }
@@ -609,10 +1005,14 @@ public class MainHook implements IXposedHookLoadPackage {
                 return;
             }
 
-            // 获取屏幕尺寸
+            // 获取屏幕尺寸。
+            // 用 Display.getRealMetrics 而不是 ctx.getResources().getDisplayMetrics()：
+            // 旋转后 groups 的 Resources 配置更新通常晚一两帧，重建坞窗时读到旧值就会
+            // 出现“已经转成竖屏、坞窗却还按横屏那套宽度/比例画”。
             WindowManager wm = (WindowManager) ctx.getSystemService(Context.WINDOW_SERVICE);
-            int screenWidth = ctx.getResources().getDisplayMetrics().widthPixels;
-            int screenHeight = ctx.getResources().getDisplayMetrics().heightPixels;
+            DisplayMetrics realMetrics = realDisplayMetrics(ctx);
+            int screenWidth = realMetrics.widthPixels;
+            int screenHeight = realMetrics.heightPixels;
 
             // 判断悬浮球在左边还是右边
             int side = 1; // 默认右边
@@ -624,7 +1024,9 @@ public class MainHook implements IXposedHookLoadPackage {
 
             hideAllFloatHandles(cl, 0f);
 
-            // 全屏透明容器
+            // 全屏透明容器。方向变化由 showFloatDock 末尾启动的 1s 轮询 watcher 检测
+            // （WindowManager 添加的视图不一定收到 onConfigurationChanged 分发，而且窗口
+            // 参数是按旋转前的像素给的，容器自身尺寸不一定跟着变，轮询最稳）。
             final FrameLayout container = new FrameLayout(ctx);
             container.setLayoutParams(new ViewGroup.LayoutParams(
                     ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.MATCH_PARENT));
@@ -644,8 +1046,23 @@ public class MainHook implements IXposedHookLoadPackage {
             }
             dock.setBackground(dockBg);
 
-            int dockWidth = screenWidth * 4 / 9;
-            int dockHeight = screenHeight - dpToPx(ctx, 100); // 上下各留50dp
+            // 横屏：坞窗只占 1/4 屏宽，把剩下的 3/4 留给应用。
+            // 竖屏：占 1/2 屏宽。画面宽度不再写死像素，直接取卡片内容宽（见 addAppCard），
+            // 所以坞窗不需要为画面特意加宽。
+            boolean landscape = screenWidth > screenHeight;
+            sDockLandscape = landscape;
+            // 把「比例钉死 + 画面铺满」同步给绘制层：竖屏 16:9、横屏 13:9，都按 cover 铺满，
+            // 宽度永远等于卡片框宽。
+            LivelyHook.setPreviewStyle(FIXED_PREVIEW_ASPECT, FIXED_PREVIEW_ASPECT
+                    ? (landscape ? PREVIEW_ASPECT_LANDSCAPE : PREVIEW_ASPECT_PORTRAIT) : 0f);
+            sDockInfo = floatHandleInfo;
+            // 坞窗宽度两个方向共用同一个值（屏幕长边/4）：
+            // 横屏的 screenWidth 是长边、竖屏的是短边，若各按「横屏 1/4、竖屏 1/2」算，
+            // 会得到 784 与 720 两个宽度，画面宽度随之 608↔544，转屏看着像「长度变短」。
+            // 统一之后坞窗和画面在两个方向完全一致。
+            int dockWidth = Math.max(screenWidth, screenHeight) / 4;
+            // 横屏高度本来就紧，上下各留 10dp；竖屏仍留 50dp
+            int dockHeight = screenHeight - dpToPx(ctx, landscape ? 20 : 100);
             FrameLayout.LayoutParams dockParams = new FrameLayout.LayoutParams(dockWidth, dockHeight);
             dockParams.gravity = Gravity.CENTER_VERTICAL | (side == 1 ? Gravity.END : Gravity.START);
             container.addView(dock, dockParams);
@@ -654,17 +1071,30 @@ public class MainHook implements IXposedHookLoadPackage {
             ScrollView scrollView = new ScrollView(ctx);
             scrollView.setBackgroundColor(0x00000000); // 透明
             scrollView.setNestedScrollingEnabled(false);
+            // 滚动时不显示侧边滚动条：坞窗本身很窄，那条竖线很扎眼
+            scrollView.setVerticalScrollBarEnabled(false);
+            scrollView.setHorizontalScrollBarEnabled(false);
+            scrollView.setScrollbarFadingEnabled(true);
+            scrollView.setOverScrollMode(View.OVER_SCROLL_NEVER);
             LinearLayout.LayoutParams scrollParams = new LinearLayout.LayoutParams(
                     LinearLayout.LayoutParams.MATCH_PARENT, 0, 1f);
             scrollView.setLayoutParams(scrollParams);
-
             LinearLayout cardList = new LinearLayout(ctx);
             cardList.setOrientation(LinearLayout.VERTICAL);
             cardList.setPadding(dpToPx(ctx, 12), dpToPx(ctx, 12), dpToPx(ctx, 12), dpToPx(ctx, 12));
             scrollView.addView(cardList);
             dock.addView(scrollView);
+            sDockScrollView = scrollView;
+            sDockCardList = cardList;
+            // 滚动时实时把卡片画面裁到可视范围，避免 surface 画到滚动区下面的「清除」按钮上。
+            scrollView.setOnScrollChangeListener(new View.OnScrollChangeListener() {
+                @Override
+                public void onScrollChange(View v, int scrollX, int scrollY, int oldScrollX, int oldScrollY) {
+                    refreshPreviewCrop();
+                }
+            });
 
-            // 清除按钮
+            // 清除按钮（坞窗容器内的普通 View，随坞窗一起显示/消失）
             TextView clearBtn = new TextView(ctx);
             clearBtn.setText("清除");
             clearBtn.setTextColor(0xFF000000);
@@ -698,10 +1128,13 @@ public class MainHook implements IXposedHookLoadPackage {
 
             XposedBridge.log(TAG + " dock apps count=" + sDockApps.size());
 
-            // 添加应用卡片
-            for (Object info : sDockApps) {
+            // 添加应用卡片：倒序——最新的最小化应用排在最上面，最早的在底部。
+            // 控制器的 mFloatHandleInfoList 是「尾部最新」（FloatHandleView 在 size==2 时
+            // 把 get(1) 当主图标就是这个原因），所以从上往下遍历即最新在上。
+            for (int i = sDockApps.size() - 1; i >= 0; i--) {
+                Object info = sDockApps.get(i);
                 try {
-                    addAppCard(ctx, cardList, info, cl);
+                    addAppCard(ctx, cardList, info, cl, dockWidth, dockHeight);
                 } catch (Throwable t) {
                     XposedBridge.log(TAG + " add app card error: " + t.getMessage());
                 }
@@ -721,11 +1154,18 @@ public class MainHook implements IXposedHookLoadPackage {
                 }
             });
 
-            // 点击坞窗外收回，点击坞窗内不拦截
+            // 点击坞窗外收回，点击坞窗内不拦截。
+            // 窗口现在只覆盖坞窗矩形，窗口外的按下由系统以 ACTION_OUTSIDE 送到这里。
             final LinearLayout finalDock = dock;
             container.setOnTouchListener(new View.OnTouchListener() {
                 @Override
                 public boolean onTouch(View v, MotionEvent event) {
+                    if (event.getAction() == MotionEvent.ACTION_OUTSIDE) {
+                        // 点在坞窗之外：收起坞窗，菜单随坞窗一起移除
+                        removeAppMenu();
+                        removeFloatDock();
+                        return true;
+                    }
                     if (event.getAction() == MotionEvent.ACTION_DOWN) {
                         float x = event.getRawX();
                         float y = event.getRawY();
@@ -756,9 +1196,18 @@ public class MainHook implements IXposedHookLoadPackage {
                 }
             });
 
-            // 窗口参数
+            // 窗口参数：窗口尺寸就是坞窗矩形，不再铺满全屏。
+            // 卡片画面是 SurfaceView，它的 surface 是窗口外面的独立图层，**不受 ScrollView
+            // 和父 View 的裁剪**：卡片列表一旦比坞窗高要滚动，画面就会画到坞窗外面、压住
+            // 「清除」按钮（3820 上快照比例 2.23、坞窗只有 2422 高，两张卡片就超了）。
+            // 把窗口收缩到坞窗本身，溢出的那一截会被窗口 layer 的 crop 裁掉，画面永远出不了坞窗。
+            // 代价：窗口不再含屏幕其它区域，点外面收回改用 FLAG_WATCH_OUTSIDE_TOUCH 的 ACTION_OUTSIDE。
+            int dockLeft = side == 1 ? screenWidth - dockWidth : 0;
+            int dockTopScreen = (screenHeight - dockHeight) / 2;
             WindowManager.LayoutParams windowParams = new WindowManager.LayoutParams(2520); // TYPE_SYSTEM_EDGE_PANEL
             windowParams.flags = WindowManager.LayoutParams.FLAG_NOT_FOCUSABLE
+                    | WindowManager.LayoutParams.FLAG_NOT_TOUCH_MODAL
+                    | WindowManager.LayoutParams.FLAG_WATCH_OUTSIDE_TOUCH
                     | WindowManager.LayoutParams.FLAG_LAYOUT_IN_SCREEN
                     | WindowManager.LayoutParams.FLAG_LAYOUT_NO_LIMITS;
             try {
@@ -768,16 +1217,30 @@ public class MainHook implements IXposedHookLoadPackage {
             } catch (Throwable ignored) {
             }
             windowParams.format = PixelFormat.TRANSLUCENT;
-            windowParams.width = screenWidth;
-            windowParams.height = screenHeight;
+            windowParams.width = dockWidth;
+            windowParams.height = dockHeight;
+            windowParams.x = dockLeft;
+            windowParams.y = dockTopScreen;
             windowParams.gravity = Gravity.TOP | Gravity.START;
             windowParams.setTitle("FreeWindowDock");
 
             wm.addView(container, windowParams);
+            sDockWinLeft = dockLeft;
+            sDockWinTop = dockTopScreen;
             sDockContainer = container;
             sDockPanel = dock;
             sDockSide = side;
             sDockShowing = true;
+            // 坞窗活着期间每秒比对一次屏幕方向，横↔竖翻转就按新方向重建
+            startOrientationWatch();
+
+            // 布局量完之后按滚动区裁一次画面（首帧时 getHeight 还是 0，所以要 post）
+            dock.postDelayed(new Runnable() {
+                @Override
+                public void run() {
+                    refreshPreviewCrop();
+                }
+            }, 80);
 
             // 右侧：从右往左滑出；左侧：从左往右滑出（官方 lively 时长/插值）
             dock.setTranslationX(side == 1 ? dockWidth : -dockWidth);
@@ -793,16 +1256,140 @@ public class MainHook implements IXposedHookLoadPackage {
         }
     }
 
+    /**
+     * 按坞窗滚动区的底边，把每张卡片的画面裁到可见范围。
+     *
+     * SurfaceView 的 surface 不在 View 树里，ScrollView 裁不到它：卡片往下滚时画面会一路
+     * 画到坞窗底部的「清除」按钮上（3820 上坞窗只有 2422 高，两张卡片加起来就超）。
+     * 滚动区和布局变化时调一次，把超出滚动区底边的那一截裁掉。
+     */
+    private static void refreshPreviewCrop() {
+        ScrollView sv = sDockScrollView;
+        LinearLayout list = sDockCardList;
+        if (sv == null || list == null) return;
+        int[] sLoc = new int[2];
+        sv.getLocationOnScreen(sLoc);
+        int visibleBottom = sLoc[1] + sv.getHeight();
+        for (int i = 0; i < list.getChildCount(); i++) {
+            View child = list.getChildAt(i);
+            if (!(child instanceof ViewGroup)) continue;
+            ViewGroup card = (ViewGroup) child;
+            for (int j = 0; j < card.getChildCount(); j++) {
+                View v = card.getChildAt(j);
+                if (v instanceof SurfaceView && PREVIEW_TAG.equals(v.getTag())) {
+                    LivelyHook.cropSnapshot((SurfaceView) v, visibleBottom);
+                }
+            }
+        }
+    }
+
     /** 添加一个应用卡片到坞窗。 */
-    private void addAppCard(Context ctx, LinearLayout cardList, Object floatHandleInfo, ClassLoader cl) {
+    /** {@code ActivityInfo.isFixedOrientationLandscape/Portrait} 的反射句柄（@hide，缓存一次）。 */
+    private static Method sIsFixedLandscape;
+    private static Method sIsFixedPortrait;
+
+    private static boolean fixedOrientation(int orientation, boolean landscape) {
+        try {
+            Method m = landscape ? sIsFixedLandscape : sIsFixedPortrait;
+            if (m == null) {
+                Class<?> ai = Class.forName("android.content.pm.ActivityInfo");
+                m = ai.getMethod(landscape ? "isFixedOrientationLandscape"
+                        : "isFixedOrientationPortrait", int.class);
+                if (landscape) {
+                    sIsFixedLandscape = m;
+                } else {
+                    sIsFixedPortrait = m;
+                }
+            }
+            Object r = m.invoke(null, orientation);
+            return r instanceof Boolean && (Boolean) r;
+        } catch (Throwable t) {
+            return false;
+        }
+    }
+
+    /**
+     * 判断某张卡片对应的任务是不是「横屏应用」。
+     *
+     * <p>口径完全照抄系统自己那份 {@code FloatHandleController}（5200 反编译 1300 行）：
+     * <pre>
+     *   float ratio = ActivityInfo.isFixedOrientationLandscape(info.appOrientation)
+     *           ? 0.5625f : 1.7777778f;
+     * </pre>
+     * 0.5625f 就是 9:16。也就是说官方不看截图、也不看屏幕方向，只看
+     * {@code FloatHandleInfo.appOrientation}（= {@code Task.getOrientation()}，
+     * 即应用自己声明的 SCREEN_ORIENTATION_*）是不是"固定横屏"。
+     *
+     * <p>后两级只是兜底：未锁方向的应用（unspecified / fullSensor）再按小窗
+     * {@code launchBounds} 的宽高判，最后才用快照宽高。
+     */
+    private boolean isLandscapeApp(int taskId, Object floatHandleInfo) {
+        try {
+            int appOrientation = XposedHelpers.getIntField(floatHandleInfo, "appOrientation");
+            if (fixedOrientation(appOrientation, true)) {
+                return true;
+            }
+            if (fixedOrientation(appOrientation, false)) {
+                return false;
+            }
+        } catch (Throwable t) {
+            XposedBridge.log(TAG + " appOrientation read failed: " + t.getMessage());
+        }
+        // 未锁方向：按小窗启动边界的宽高（官方 onBindViewHolder 也是拿 launchBounds 的 h/w 起的）
+        try {
+            Object fti = XposedHelpers.getObjectField(floatHandleInfo, "flexibleTaskInfo");
+            if (fti != null) {
+                Object lb = XposedHelpers.callMethod(fti, "getLaunchBounds");
+                if (lb instanceof Rect) {
+                    Rect r = (Rect) lb;
+                    if (r.width() > 0 && r.height() > 0) {
+                        return r.width() > r.height();
+                    }
+                }
+            }
+        } catch (Throwable ignored) {
+        }
+        if (taskId >= 0) {
+            try {
+                Class<?> atmCls = Class.forName("android.app.ActivityTaskManager");
+                Object atm = XposedHelpers.callStaticMethod(atmCls, "getService");
+                if (atm != null) {
+                    Object taskInfo = XposedHelpers.callMethod(atm, "getTaskInfo", taskId);
+                    if (taskInfo != null) {
+                        Object cfg = XposedHelpers.getObjectField(taskInfo, "configuration");
+                        if (cfg != null) {
+                            int o = XposedHelpers.getIntField(cfg, "orientation");
+                            if (o == 2) return true;    // Configuration.ORIENTATION_LANDSCAPE
+                            if (o == 1) return false;   // Configuration.ORIENTATION_PORTRAIT
+                        }
+                        Object bounds = XposedHelpers.getObjectField(taskInfo, "bounds");
+                        if (bounds instanceof Rect) {
+                            Rect r = (Rect) bounds;
+                            if (r.width() > 0 && r.height() > 0) {
+                                return r.width() > r.height();
+                            }
+                        }
+                    }
+                }
+            } catch (Throwable t) {
+                XposedBridge.log(TAG + " orientation probe task=" + taskId + " failed: " + t.getMessage());
+            }
+        }
+        return LivelyHook.snapshotIsLandscape(floatHandleInfo);
+    }
+
+    private void addAppCard(Context ctx, LinearLayout cardList, Object floatHandleInfo,
+                            ClassLoader cl, int dockWidth, int dockHeight) {
         // 获取包名和任务信息（FloatHandleInfo 直接有 getPackageName/getUserId 和 taskId 字段）
         String pkgName = "";
         int userId = 0;
         int taskId = -1;
+        int appOrientation = -1;
         try {
             pkgName = (String) XposedHelpers.callMethod(floatHandleInfo, "getPackageName");
             userId = (int) XposedHelpers.callMethod(floatHandleInfo, "getUserId");
             taskId = XposedHelpers.getIntField(floatHandleInfo, "taskId");
+            appOrientation = XposedHelpers.getIntField(floatHandleInfo, "appOrientation");
         } catch (Throwable ignored) {
         }
         XposedBridge.log(TAG + " addAppCard pkg=" + pkgName + " taskId=" + taskId + " userId=" + userId);
@@ -891,13 +1478,44 @@ public class MainHook implements IXposedHookLoadPackage {
             }
         });
 
-        // 预览区：迷你浮窗静态画面（ImageView）
-        ImageView preview = LivelyHook.createPreview(ctx, floatHandleInfo, cl);
+        // 画面区：用 SurfaceView 承载快照，不再用 ImageView。
+        // 尺寸规则（横竖屏同一套）：宽 = dockWidth - 44dp（标题栏「图标左缘 → 三点右缘」那段），
+        // 高 = 宽 × 快照真实比例，再受坞窗可用高度约束。
+        // 坞窗宽度两个方向已经统一，所以这里不需要额外冻结尺寸，转屏算出来就是同一个值。
+        SurfaceView preview = LivelyHook.createSnapshotSurface(ctx, floatHandleInfo, cl);
+        int previewWidth = Math.max(dpToPx(ctx, 120), dockWidth - dpToPx(ctx, 44));
+        int maxPreviewHeight = Math.max(dpToPx(ctx, 120), (int) (dockHeight * 0.85f));
+        // 固定比例：竖屏 16:9、横屏 13:9（与系统自由小窗两个默认比例一致）；
+        // 横屏应用单独走 9:16，用一个矮框把横向画面完整铺开。
+        // 关掉 FIXED_PREVIEW_ASPECT 就退回按快照真实比例的老行为。
+        boolean appLandscape = isLandscapeApp(taskId, floatHandleInfo);
+        float aspect;
+        if (FIXED_PREVIEW_ASPECT) {
+            if (appLandscape) {
+                aspect = PREVIEW_ASPECT_LANDSCAPE_APP;
+            } else {
+                aspect = sDockLandscape ? PREVIEW_ASPECT_LANDSCAPE : PREVIEW_ASPECT_PORTRAIT;
+            }
+        } else {
+            aspect = LivelyHook.snapshotAspect(floatHandleInfo);
+        }
+        if (aspect <= 0f) aspect = PREVIEW_ASPECT_FALLBACK;
+        int previewHeight = (int) (previewWidth * aspect);
+        if (previewHeight > maxPreviewHeight) {
+            previewHeight = maxPreviewHeight;
+            previewWidth = (int) (previewHeight / aspect);
+            XposedBridge.log(TAG + " preview height capped: " + previewWidth + "x" + previewHeight);
+        }
+        XposedBridge.log(TAG + " addAppCard surface width=" + previewWidth + " height=" + previewHeight
+                + " aspect=" + aspect + " appLandscape=" + appLandscape
+                + " appOrientation=" + appOrientation + " dock=" + dockWidth + "x" + dockHeight);
         LinearLayout.LayoutParams previewParams = new LinearLayout.LayoutParams(
-                LinearLayout.LayoutParams.MATCH_PARENT, dpToPx(ctx, 200));
-        previewParams.leftMargin = dpToPx(ctx, 10);
-        previewParams.rightMargin = dpToPx(ctx, 10);
+                previewWidth, previewHeight);
+        // 水平居中；左右不留 margin，画面边缘就落在图标/三点那两条竖线上。
+        previewParams.gravity = Gravity.CENTER_HORIZONTAL;
         previewParams.bottomMargin = dpToPx(ctx, 10);
+        // 打个 tag：滚动时要按它把画面裁到坞窗滚动区的可见范围（见 refreshPreviewCrop）。
+        preview.setTag(PREVIEW_TAG);
         card.addView(preview, previewParams);
 
         View.OnClickListener restoreListener = new View.OnClickListener() {
@@ -906,8 +1524,19 @@ public class MainHook implements IXposedHookLoadPackage {
                 restoreFloatInfo(finalInfo, finalCl);
             }
         };
-        preview.setOnClickListener(restoreListener);
         card.setOnClickListener(restoreListener);
+        topBar.setOnClickListener(restoreListener);
+
+        // 卡片高度定下来之后，把画面按滚动区底边再裁一次
+        ScrollView sv = sDockScrollView;
+        if (sv != null) {
+            sv.postDelayed(new Runnable() {
+                @Override
+                public void run() {
+                    refreshPreviewCrop();
+                }
+            }, 60);
+        }
     }
 
     /**
@@ -1017,6 +1646,16 @@ public class MainHook implements IXposedHookLoadPackage {
      * 父窗口不可聚焦时子窗口拿不到 token/焦点，showAsDropDown 静默失败，表现就是「点三点没反应」。
      */
     private static View sAppMenuView = null;
+    /** 三点菜单是独立窗口，移除时要靠它来 removeView。 */
+    private static WindowManager sAppMenuWm = null;
+    /** 画面 SurfaceView 的 tag：滚动时靠它找出所有卡片里的画面做裁剪。 */
+    private static final String PREVIEW_TAG = "freewindow.snapshotPreview";
+    /** 坞窗的滚动容器与卡片列表：滚动时按可视区裁 SurfaceView（surface 不跟着 ScrollView 裁剪）。 */
+    private static ScrollView sDockScrollView = null;
+    private static LinearLayout sDockCardList = null;
+    /** 坞窗窗口的屏幕左上角：SurfaceView 的 layer 坐标是相对窗口的，裁画面时要换算。 */
+    private static int sDockWinLeft = 0;
+    private static int sDockWinTop = 0;
 
     /** 显示单个应用的弹出菜单（取消运行、取消静音、关闭）。 */
     private void showAppMenu(Context ctx, View anchor, final String pkgName, final int userId,
@@ -1079,34 +1718,48 @@ public class MainHook implements IXposedHookLoadPackage {
             menuContainer.addView(itemTv, itemParams);
         }
 
-        // 定位：贴在三点点按钮正下方居中，左右不超出屏幕
+        // 定位：贴在三点点按钮正下方居中，左右不超出屏幕。
+        // 菜单挂在**独立的 WindowManager 窗口**上，而不是坞窗容器里 —— 卡片画面是
+        // SurfaceView 且 setZOrderOnTop(true)，它只有在「同一个窗口内」才压过别的 View；
+        // 菜单放进坞窗容器就会被画面盖住。开成独立窗口后，后添加的窗口在同 type 内层级更高，
+        // 于是「菜单能遮画面、画面遮不住菜单」。
         int[] anchorLoc = new int[2];
         anchor.getLocationOnScreen(anchorLoc);
-        int[] containerLoc = new int[2];
-        container.getLocationOnScreen(containerLoc);
         int screenWidth = ctx.getResources().getDisplayMetrics().widthPixels;
-        int left = anchorLoc[0] - containerLoc[0] + anchor.getWidth() / 2 - menuWidth / 2;
+        int left = anchorLoc[0] + anchor.getWidth() / 2 - menuWidth / 2;
         left = Math.max(dpToPx(ctx, 8), Math.min(left, screenWidth - menuWidth - dpToPx(ctx, 8)));
-        int top = anchorLoc[1] - containerLoc[1] + anchor.getHeight() + dpToPx(ctx, 4);
+        int top = anchorLoc[1] + anchor.getHeight() + dpToPx(ctx, 4);
 
-        FrameLayout.LayoutParams lp = new FrameLayout.LayoutParams(
-                menuWidth, ViewGroup.LayoutParams.WRAP_CONTENT);
-        lp.leftMargin = left;
-        lp.topMargin = top;
-        container.addView(menuContainer, lp);
-        sAppMenuView = menuContainer;
-        XposedBridge.log(TAG + " showAppMenu attached at " + left + "," + top);
+        WindowManager wm = (WindowManager) ctx.getSystemService(Context.WINDOW_SERVICE);
+        WindowManager.LayoutParams lp = new WindowManager.LayoutParams(
+                menuWidth, ViewGroup.LayoutParams.WRAP_CONTENT,
+                2520,
+                WindowManager.LayoutParams.FLAG_NOT_FOCUSABLE
+                        | WindowManager.LayoutParams.FLAG_NOT_TOUCH_MODAL
+                        | WindowManager.LayoutParams.FLAG_LAYOUT_NO_LIMITS,
+                PixelFormat.TRANSLUCENT);
+        lp.gravity = Gravity.TOP | Gravity.START;
+        lp.x = left;
+        lp.y = top;
+        try {
+            wm.addView(menuContainer, lp);
+            sAppMenuView = menuContainer;
+            sAppMenuWm = wm;
+            XposedBridge.log(TAG + " showAppMenu attached at " + left + "," + top);
+        } catch (Throwable t) {
+            XposedBridge.log(TAG + " showAppMenu addView failed: " + t);
+        }
     }
 
     /** 移除菜单。 */
-    private void removeAppMenu() {
-        View menu = sAppMenuView;
+    private void removeAppMenu() {        View menu = sAppMenuView;
         sAppMenuView = null;
-        if (menu != null && menu.getParent() instanceof ViewGroup) {
-            try {
-                ((ViewGroup) menu.getParent()).removeView(menu);
-            } catch (Throwable ignored) {
-            }
+        WindowManager wm = sAppMenuWm;
+        sAppMenuWm = null;
+        if (menu == null) return;
+        try {
+            if (wm != null) wm.removeViewImmediate(menu);
+        } catch (Throwable ignored) {
         }
     }
 
@@ -1315,6 +1968,125 @@ public class MainHook implements IXposedHookLoadPackage {
     }
 
     /** 移除坞窗：右侧从左往右滑入收回，左侧从右往左滑入收回，结束后再显示悬浮球。 */
+    /**
+     * 坞窗开着时屏幕方向翻转：拆掉按旧方向建好的坞窗，按新方向重建一次。
+     *
+     * 这里直接 removeViewImmediate，不走滑出动画——旋转过程中两套布局叠在一起会闪。
+     * 重建延后 350ms，等系统把新方向的配置和窗口参数发下来，否则会拿到旧的
+     * screenWidth/screenHeight，建出来还是旧方向的大小。
+     */
+    private void onDockOrientationChanged(boolean nowLandscape) {
+        if (!sDockShowing || nowLandscape == sDockLandscape) return;
+        final Object fhv = sCurrentFloatHandleView;
+        final Object info = sDockInfo;
+        final ClassLoader cl = sClassLoader;
+        if (fhv == null || info == null || cl == null) return;
+        XposedBridge.log(TAG + " dock orientation changed, rebuild landscape=" + nowLandscape);
+
+        // 缓存的预览图是旋转前那个方向的画面，不清掉重建出来还是旧比例
+        LivelyHook.invalidateSnapshot(info);
+
+        removeAppMenu();
+        FrameLayout container = sDockContainer;
+        sDockContainer = null;
+        sDockPanel = null;
+        sDockScrollView = null;
+        sDockCardList = null;
+        sDockShowing = false;
+        sDockClosing = false;
+        if (container != null) {
+            try {
+                WindowManager wm = (WindowManager) container.getContext()
+                        .getSystemService(Context.WINDOW_SERVICE);
+                wm.removeViewImmediate(container);
+            } catch (Throwable t) {
+                XposedBridge.log(TAG + " remove dock on rotate failed: " + t.getMessage());
+            }
+        }
+
+        // 重建必须回到创建坞窗视图的那个线程（android.ui）：跨线程 addView/removeView 会
+        // 抛 CalledFromWrongThreadException 并让 system_server 重启。拿不到就不重建。
+        if (sHandleHandler == null) {
+            XposedBridge.log(TAG + " rebuild skipped: ui handler missing");
+            return;
+        }
+        sHandleHandler.postDelayed(new Runnable() {
+            @Override
+            public void run() {
+                try {
+                    showFloatDock(fhv, info, cl);
+                } catch (Throwable t) {
+                    XposedBridge.log(TAG + " rebuild dock failed: " + t.getMessage());
+                }
+            }
+        }, 350);
+    }
+
+    /** 坞窗存活期间的方向轮询：每秒比对一次屏幕宽高，横↔竖翻转就重建坞窗。 */
+    private void startOrientationWatch() {
+        if (sOrientationWatch) return;
+        // 必须在创建坞窗视图的那个线程（android.ui）上轮询：重建过程要 removeView / addView，
+        // 换到 main 线程去碰这些 View 会触发 CalledFromWrongThreadException，直接把 system_server 打死。
+        if (sHandleHandler == null) {
+            XposedBridge.log(TAG + " skip orientation watch: ui handler missing");
+            return;
+        }
+        sOrientationWatch = true;
+        sHandleHandler.postDelayed(orientationWatcher, ORIENTATION_CHECK_MS);
+    }
+
+    private final Runnable orientationWatcher = new Runnable() {
+        @Override
+        public void run() {
+            if (!sDockShowing || sDockContainer == null) {
+                sOrientationWatch = false;
+                return;
+            }
+            try {
+                DisplayMetrics dm = realDisplayMetrics(sDockContainer.getContext());
+                boolean nowLandscape = dm.widthPixels > dm.heightPixels;
+                if (nowLandscape != sDockLandscape) {
+                    sOrientationWatch = false;
+                    onDockOrientationChanged(nowLandscape);
+                    return;
+                }
+            } catch (Throwable t) {
+                XposedBridge.log(TAG + " orientation watch error: " + t.getMessage());
+            }
+            if (sHandleHandler == null) {
+                sOrientationWatch = false;
+                return;
+            }
+            sHandleHandler.postDelayed(this, ORIENTATION_CHECK_MS);
+        }
+    };
+
+    private static Handler watchHandler() {
+        return sHandleHandler != null ? sHandleHandler : new Handler(Looper.getMainLooper());
+    }
+
+    /**
+     * 当前屏幕的真实像素尺寸。
+     *
+     * <p>优先 {@code Display.getRealMetrics()}：它是显示设备本身的尺寸，旋转后立刻正确。
+     * {@code Resources.getDisplayMetrics()} 依赖该 Context 的配置更新，system_server 里
+     * 拿到的 WindowContext 往往晚一两帧，重建坞窗时读到旧方向的值，就会出现“已经竖屏了
+     * 但坞窗还是横屏宽度/比例”。
+     */
+    private static DisplayMetrics realDisplayMetrics(Context ctx) {
+        DisplayMetrics dm = new DisplayMetrics();
+        try {
+            WindowManager wm = (WindowManager) ctx.getSystemService(Context.WINDOW_SERVICE);
+            Object display = XposedHelpers.callMethod(wm, "getDefaultDisplay");
+            XposedHelpers.callMethod(display, "getRealMetrics", dm);
+            if (dm.widthPixels > 0 && dm.heightPixels > 0) return dm;
+        } catch (Throwable t) {
+            XposedBridge.log(TAG + " realDisplayMetrics fallback: " + t.getMessage());
+        }
+        dm.setTo(ctx.getResources().getDisplayMetrics());
+        return dm;
+    }
+
     private void removeFloatDock() {
         if (sDockClosing) {
             return;
@@ -1353,6 +2125,12 @@ public class MainHook implements IXposedHookLoadPackage {
     }
 
     private void finishRemoveDock() {
+        // 坞窗真正关掉了：把画面快照从「现用」降级为「兜底」，
+        // 下次重新打开坞窗时才会重新抓一张；坞窗开着期间转屏不受影响。
+        try {
+            LivelyHook.releaseSnapshot(sDockInfo);
+        } catch (Throwable ignored) {
+        }
         if (sDockContainer != null) {
             try {
                 Context ctx = sDockContainer.getContext();
@@ -1363,8 +2141,11 @@ public class MainHook implements IXposedHookLoadPackage {
             sDockContainer = null;
         }
         sDockPanel = null;
+        sDockScrollView = null;
+        sDockCardList = null;
         sDockShowing = false;
         sDockClosing = false;
+        sOrientationWatch = false;
         if (sClassLoader != null) {
             hideAllFloatHandles(sClassLoader, 1f);
         }

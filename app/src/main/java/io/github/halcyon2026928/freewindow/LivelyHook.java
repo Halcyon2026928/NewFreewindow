@@ -8,7 +8,11 @@ import android.graphics.ColorSpace;
 import android.graphics.Matrix;
 import android.graphics.Outline;
 import android.graphics.Paint;
+import android.graphics.Path;
+import android.graphics.PixelFormat;
+import android.graphics.PorterDuff;
 import android.graphics.Rect;
+import android.graphics.RectF;
 import android.graphics.Shader;
 import android.graphics.drawable.GradientDrawable;
 import android.hardware.HardwareBuffer;
@@ -18,7 +22,10 @@ import android.os.Looper;
 import android.util.Log;
 import android.util.TypedValue;
 import android.view.SurfaceControl;
+import android.view.SurfaceHolder;
+import android.view.SurfaceView;
 import android.view.View;
+import android.view.ViewGroup;
 import android.view.ViewOutlineProvider;
 import android.widget.ImageView;
 
@@ -26,6 +33,8 @@ import java.io.FileWriter;
 import java.lang.reflect.Constructor;
 import java.lang.reflect.Method;
 import java.util.concurrent.ConcurrentHashMap;
+import java.util.concurrent.ExecutorService;
+import java.util.concurrent.Executors;
 
 import de.robv.android.xposed.XC_MethodHook;
 import de.robv.android.xposed.XposedBridge;
@@ -40,6 +49,18 @@ public final class LivelyHook {
     private static final String TAG = "freewindow-lively";
     private static final String DUMP = "/data/system/fw_lively.txt";
     private static final ConcurrentHashMap<Integer, Bitmap> sSnapshots = new ConcurrentHashMap<>();
+    /** 固定画面比例时铺满整块画面（cover，裁掉溢出部分），默认 false 走等比完整装入（fit）。 */
+    private static volatile boolean sFillMode = false;
+    /** 固定比例值（高/宽）；>0 时覆盖快照真实比例，0 表示不覆盖。由坞窗注入。 */
+    private static volatile float sAspectOverride = 0f;
+
+    /** 坞窗打开时注入：是否铺满、以及要不要把画面比例钉死。 */
+    public static void setPreviewStyle(boolean fill, float aspectOverride) {
+        sFillMode = fill;
+        sAspectOverride = aspectOverride;
+    }
+    /** 旋转时被作废的旧快照：重新抓图失败时用它兜底，避免卡片空白。 */
+    private static final ConcurrentHashMap<Integer, Bitmap> sFallback = new ConcurrentHashMap<>();
     private static final Handler sMain = new Handler(Looper.getMainLooper());
     private static ClassLoader sClassLoader;
 
@@ -107,7 +128,8 @@ public final class LivelyHook {
                 Bitmap bmp = readInfoSnapshot(info);
                 if (bmp == null) bmp = captureTaskBitmap(info, taskId, sClassLoader);
                 if (bmp != null) {
-                    sSnapshots.put(taskId, bmp);
+                    // 已有缓存就不覆盖：转屏后系统偶尔会给一张空白快照，覆盖掉就等于画面消失。
+                    if (!sSnapshots.containsKey(taskId)) sSnapshots.put(taskId, bmp);
                     log("cached afterAdd taskId=" + taskId + " " + bmp.getWidth() + "x" + bmp.getHeight());
                 } else {
                     log("afterAdd capture null taskId=" + taskId);
@@ -132,7 +154,7 @@ public final class LivelyHook {
                     if (taskId < 0) return;
                     Bitmap bmp = bitmapFromTaskSnapshot(result);
                     if (bmp != null) {
-                        sSnapshots.put(taskId, bmp);
+                        if (!sSnapshots.containsKey(taskId)) sSnapshots.put(taskId, bmp);
                         log("cached " + param.method.getName() + " taskId=" + taskId
                                 + " " + bmp.getWidth() + "x" + bmp.getHeight());
                     }
@@ -181,7 +203,7 @@ public final class LivelyHook {
                     Object snap = findSnapshotObj(param.args, param.getResult());
                     Bitmap bmp = bitmapFromTaskSnapshot(snap);
                     if (bmp != null && taskId >= 0) {
-                        sSnapshots.put(taskId, bmp);
+                        if (!sSnapshots.containsKey(taskId)) sSnapshots.put(taskId, bmp);
                         log("cached sys " + param.method.getName() + " taskId=" + taskId
                                 + " " + bmp.getWidth() + "x" + bmp.getHeight());
                     }
@@ -259,12 +281,246 @@ public final class LivelyHook {
         }
     }
 
+    /**
+     * 作废某个任务的缓存快照。
+     *
+     * <p>快照是按 taskId 缓存的一张图，内容是“拍照那一刻屏幕方向的画面”。屏幕旋转后重建坞窗时
+     * 如果不清掉，{@link #createPreview} 会直接复用它，卡片比例就一直停在旋转前那个方向
+     * （看着像“坞窗转了、画面没转”）。清掉之后会重新抓一次当前方向的画面。
+     */
+    public static void invalidateSnapshot(Object floatHandleInfo) {
+        int taskId = readTaskId(floatHandleInfo);
+        if (taskId < 0) return;
+        // 转屏后不再作废旧图：旧图一律保留（sSnapshots 原样 + sFallback 备份）。
+        // 这样转屏重建卡片时 createPreview / fill 都能立刻命中缓存，不再重新抓图 ——
+        // 重新抓图正是 5200（ColorOS 17 / Android 17）上「画面消失 + 有延迟」的来源。
+        Bitmap old = sSnapshots.get(taskId);
+        if (old != null && !old.isRecycled()) {
+            sFallback.put(taskId, old);
+            log("snapshot kept across rotation taskId=" + taskId);
+        }
+    }
+
+    /**
+     * 坞窗真正关闭时把该任务的快照从「现用缓存」移到「兜底」。
+     *
+     * <p>语义（用户定的）：坞窗关掉、下次重新打开时才去抓新图；坞窗开着期间无论怎么转屏，
+     * 画面都保持这一张不动。所以这里只清 sSnapshots，旧图仍留在 sFallback 里，
+     * 重新打开坞窗的瞬间先用它铺住（不出现空白），随后抓到新图再替换。
+     */
+    public static void releaseSnapshot(Object floatHandleInfo) {
+        int taskId = readTaskId(floatHandleInfo);
+        if (taskId >= 0) {
+            Bitmap old = sSnapshots.remove(taskId);
+            if (old != null && !old.isRecycled()) sFallback.put(taskId, old);
+            log("snapshot released taskId=" + taskId);
+        } else {
+            sSnapshots.clear();
+            log("snapshot released all");
+        }
+    }
+
+    /**
+     * 卡片画面改用 SurfaceView 承载：把快照直接画到 surface 上，不走 ImageView。
+     *
+     * <p>这条路径是重新设计的一套，和下面 ImageView 那套互不相干：
+     * <ol>
+     *   <li>画面来源仍是抓出来的快照 Bitmap：先查缓存（sSnapshots / sFallback），
+     *       没有才抓一次；抓到就固定住，转屏不重抓、不复算比例。</li>
+     *   <li>绘制挂在 SurfaceHolder 回调上：surfaceCreated / surfaceChanged 各画一次，
+     *       后台抓到新图后再补画一次。</li>
+     *   <li>SurfaceView 的 surface 不参与 View 的 clipToOutline，圆角只能在画布上裁，
+     *       所以 surface 设为 {@code setZOrderOnTop(true)} + {@code TRANSLUCENT}，
+     *       每次先把整块清成全透明，再用圆角 Path 裁着画图 —— 圆角外透明，透出坞窗
+     *       自身的浅灰底，不会出现黑边。</li>
+     *   <li>绘制跑在单线程池里：坞窗建在 system_server 的 android.ui 线程上，
+     *       不能让 lockCanvas 阻塞它。</li>
+     * </ol>
+     */
+    public static SurfaceView createSnapshotSurface(Context ctx, Object floatHandleInfo, ClassLoader cl) {
+        SurfaceView view = new SurfaceView(ctx);
+        SurfaceHolder holder = view.getHolder();
+        view.setZOrderOnTop(true);
+        holder.setFormat(PixelFormat.TRANSLUCENT);
+        int taskId = readTaskId(floatHandleInfo);
+        SnapshotSurface painter = new SnapshotSurface(ctx, holder, taskId, floatHandleInfo, cl);
+        holder.addCallback(painter);
+        painter.load();
+        log("createSnapshotSurface taskId=" + taskId);
+        return view;
+    }
+
+    /**
+     * 把画面 surface 裁到「坞窗滚动区」的可见范围。
+     *
+     * SurfaceView 的 surface 是窗口之外的独立图层：坞窗窗口的 crop 能挡住坞窗外的溢出，
+     * 但挡不住「坞窗内部、滚动区下面」的那一截 —— 卡片往下滚时画面会一直画到坞窗底部的
+     * 「清除」按钮上。滚动区顶边就是坞窗窗口顶边，向上溢出的部分已由窗口 crop 挡掉，
+     * 所以这里只需要裁底部：保留从 surface 顶部算起、仍然落在滚动区内的那一截。
+     *
+     * @param visibleBottomScreen 滚动区底边的屏幕 y
+     */
+    public static void cropSnapshot(SurfaceView view, int visibleBottomScreen) {
+        try {
+            Object sc = XposedHelpers.callMethod(view, "getSurfaceControl");
+            if (sc == null) return;
+            SurfaceControl surface = (SurfaceControl) sc;
+            int w = view.getWidth();
+            int h = view.getHeight();
+            if (w <= 0 || h <= 0) return;
+            int[] loc = new int[2];
+            view.getLocationOnScreen(loc);
+            int visibleH = visibleBottomScreen - loc[1];
+            SurfaceControl.Transaction t = new SurfaceControl.Transaction();
+            if (visibleH <= 0) {
+                t.setAlpha(surface, 0f);
+            } else if (visibleH >= h) {
+                t.setAlpha(surface, 1f);
+                t.setCrop(surface, null);
+            } else {
+                t.setAlpha(surface, 1f);
+                t.setCrop(surface, new Rect(0, 0, w, visibleH));
+            }
+            t.apply();
+        } catch (Throwable t) {
+            log("cropSnapshot error: " + t);
+        }
+    }
+
+    /** SurfaceView 的画布渲染器：管快照的获取、缓存的复用和 surface 的绘制。 */
+    private static final class SnapshotSurface implements SurfaceHolder.Callback {
+        private static final ExecutorService POOL = Executors.newSingleThreadExecutor();
+
+        private final float density;
+        private final SurfaceHolder holder;
+        private final int taskId;
+        private final Object info;
+        private final ClassLoader loader;
+        private volatile Bitmap shot;
+        private volatile boolean surfaceReady;
+
+        SnapshotSurface(Context ctx, SurfaceHolder holder, int taskId, Object info, ClassLoader loader) {
+            this.density = ctx.getResources().getDisplayMetrics().density;
+            this.holder = holder;
+            this.taskId = taskId;
+            this.info = info;
+            this.loader = loader;
+        }
+
+        /** 取图：缓存优先，没有就后台抓一次并写回缓存，之后一直用这一张。 */
+        void load() {
+            Bitmap cached = taskId >= 0 ? sSnapshots.get(taskId) : null;
+            if ((cached == null || cached.isRecycled()) && taskId >= 0) cached = sFallback.get(taskId);
+            if (cached != null && !cached.isRecycled()) {
+                shot = cached;
+                if (taskId >= 0) sSnapshots.put(taskId, cached);
+                log("snapshot surface reuse taskId=" + taskId);
+                draw();
+                return;
+            }
+            POOL.execute(new Runnable() {
+                @Override
+                public void run() {
+                    Bitmap b = captureTaskBitmap(info, taskId, loader);
+                    if (b == null) {
+                        log("snapshot surface capture null taskId=" + taskId);
+                        return;
+                    }
+                    if (taskId >= 0) sSnapshots.put(taskId, b);
+                    shot = b;
+                    log("snapshot surface captured taskId=" + taskId
+                            + " " + b.getWidth() + "x" + b.getHeight());
+                    draw();
+                }
+            });
+        }
+
+        @Override
+        public void surfaceCreated(SurfaceHolder h) {
+            surfaceReady = true;
+            draw();
+        }
+
+        @Override
+        public void surfaceChanged(SurfaceHolder h, int format, int width, int height) {
+            surfaceReady = true;
+            draw();
+        }
+
+        @Override
+        public void surfaceDestroyed(SurfaceHolder h) {
+            surfaceReady = false;
+            log("snapshot surface destroyed taskId=" + taskId);
+        }
+
+        private void draw() {
+            if (!surfaceReady) return;
+            POOL.execute(new Runnable() {
+                @Override
+                public void run() {
+                    paint();
+                }
+            });
+        }
+
+        /** 整块清透明 → 圆角裁剪 → 等比完整装入并居中。 */
+        private void paint() {
+            Canvas canvas;
+            try {
+                canvas = holder.lockCanvas();
+            } catch (Throwable t) {
+                log("snapshot lockCanvas " + t);
+                return;
+            }
+            if (canvas == null) return;
+            try {
+                int w = canvas.getWidth();
+                int h = canvas.getHeight();
+                canvas.drawColor(0, PorterDuff.Mode.CLEAR);
+                Bitmap src = shot;
+                if (src == null || src.isRecycled() || w <= 0 || h <= 0) return;
+                float scale;
+                boolean fill = sFillMode;
+                if (fill) {
+                    // 固定比例：框已经钉死（竖屏 16:9 / 横屏 13:9），画面按「铺满」缩放，
+                    // 快照比框更高就上下各裁一点，比框更宽就左右裁，宽度永远等于卡片框宽。
+                    scale = Math.max(w / (float) src.getWidth(), h / (float) src.getHeight());
+                } else {
+                    scale = Math.min(w / (float) src.getWidth(), h / (float) src.getHeight());
+                }
+                float dw = src.getWidth() * scale;
+                float dh = src.getHeight() * scale;
+                float dx = (w - dw) * 0.5f;
+                float dy = (h - dh) * 0.5f;
+                Path clip = new Path();
+                float radius = 12f * density;
+                RectF frame = fill ? new RectF(0, 0, w, h) : new RectF(dx, dy, dx + dw, dy + dh);
+                clip.addRoundRect(frame, radius, radius,
+                        Path.Direction.CW);
+                Paint paint = new Paint(Paint.ANTI_ALIAS_FLAG | Paint.FILTER_BITMAP_FLAG);
+                canvas.save();
+                canvas.clipPath(clip);
+                canvas.drawBitmap(src, null, new RectF(dx, dy, dx + dw, dy + dh), paint);
+                canvas.restore();
+            } catch (Throwable t) {
+                log("snapshot paint " + t);
+            } finally {
+                try {
+                    holder.unlockCanvasAndPost(canvas);
+                } catch (Throwable ignored) {
+                }
+            }
+        }
+    }
+
     public static ImageView createPreview(Context ctx, Object floatHandleInfo, ClassLoader cl) {
         final ImageView preview = new ImageView(ctx);
-        preview.setScaleType(ImageView.ScaleType.CENTER_CROP);
+        preview.setScaleType(ImageView.ScaleType.FIT_CENTER);
         final float radius = dp(ctx, 12);
         GradientDrawable bg = new GradientDrawable();
-        bg.setColor(0xFFD0D0D0);
+        // 完全透明：画面没铺满时不再露出灰底，直接透出坞窗本身（#E5E5E5）的浅色。
+        // 圆角仍由下面 outline + clipToOutline 保证，不依赖这个背景。
+        bg.setColor(0x00000000);
         bg.setCornerRadius(radius);
         preview.setBackground(bg);
         preview.setOutlineProvider(new ViewOutlineProvider() {
@@ -317,17 +573,78 @@ public final class LivelyHook {
 
             @Override
             public void run() {
-                Bitmap bmp = captureTaskBitmap(info, taskId, loader);
-                if (bmp == null) {
+                // 缓存里已经有这个任务的画面：直接复用，绝不重新抓图。
+                // 转屏重建卡片会再走到这里，而重新抓图在 A17/ColorOS 17 上要么拿到空白、
+                // 要么要等 surface 重建完才有内容（表现为「转屏后画面消失、过一会儿才出来」）。
+                // 用户口径：转屏不动这张图，一直显示它。
+                Bitmap cached = sSnapshots.get(taskId);
+                if (cached != null && !cached.isRecycled()) {
+                    final Bitmap reuse = cached;
+                    preview.post(new Runnable() {
+                        @Override
+                        public void run() {
+                            applyRoundedBitmap(preview, reuse, radius);
+                        }
+                    });
+                    log("fill reuse snapshot taskId=" + taskId);
+                    return;
+                }
+                // 缓存被 releaseSnapshot 清掉了（坞窗关过再打开）：先立刻把上一张旧图铺上去，
+                // 保证这个空窗期里卡片不是空白，再往下走正常抓图流程去刷新。
+                Bitmap stale = sFallback.get(taskId);
+                if (stale != null && !stale.isRecycled()) {
+                    final Bitmap show = stale;
+                    preview.post(new Runnable() {
+                        @Override
+                        public void run() {
+                            applyRoundedBitmap(preview, show, radius);
+                        }
+                    });
+                    log("fill show stale while refreshing taskId=" + taskId);
+                }
+                Bitmap captured = captureTaskBitmap(info, taskId, loader);
+                if (captured == null) {
+                    // 主抓图路径失败（旋转瞬间 surface 正在重建、或某些 ROM 上直接拒绝），
+                    // 先退到系统自己给的 FloatHandleInfo.snapShot —— 官方坞窗用的就是它。
+                    Bitmap fromInfo = readInfoSnapshot(info);
+                    if (fromInfo != null) {
+                        captured = softwareCopy(fromInfo);
+                        if (captured != null) log("capture fallback to info snapshot taskId=" + taskId);
+                    }
+                }
+                if (captured == null) {
                     log("capture null taskId=" + taskId + " try=" + tries);
                     if (tries++ < 3) {
                         sMain.postDelayed(this, 400);
+                        return;
+                    }
+                    // 还是抓不到：退回旋转前那张图，宁可显示旧方向的画面，也不能让卡片空白。
+                    final Bitmap old = sFallback.get(taskId);
+                    if (old != null && !old.isRecycled()) {
+                        preview.post(new Runnable() {
+                            @Override
+                            public void run() {
+                                applyRoundedBitmap(preview, old, radius);
+                                log("capture failed, fallback to previous snapshot taskId=" + taskId);
+                            }
+                        });
                     }
                     return;
                 }
+                final Bitmap bmp = captured;
                 sSnapshots.put(taskId, bmp);
-                applyRoundedBitmap(preview, bmp, radius);
-                log("preview captured taskId=" + taskId + " " + bmp.getWidth() + "x" + bmp.getHeight());
+                // 必须投回预览 View 自己的线程再设图。
+                // 坞窗是挂在 system_server 的 android.ui 线程上的（showFloatDock 由悬浮球点击回调触发），
+                // 而这里（sMain = main 线程）直接 setImageBitmap 会抛
+                // ViewRootImpl$CalledFromWrongThreadException，直接把 system_server 打死重启。
+                preview.post(new Runnable() {
+                    @Override
+                    public void run() {
+                        applyRoundedBitmap(preview, bmp, radius);
+                        log("preview captured taskId=" + taskId + " "
+                                + bmp.getWidth() + "x" + bmp.getHeight());
+                    }
+                });
             }
         };
         if (Looper.myLooper() == Looper.getMainLooper()) {
@@ -338,8 +655,84 @@ public final class LivelyHook {
         return preview;
     }
 
+    /**
+     * 官方比例公式：{@code radio = min(1.7778f, h / w)}。
+     *
+     * <p>抄自 {@code LivelyFloatHandleView$LivelyFloatHandleRecyclerViewAdapter.onBindViewHolder}：
+     * 卡片高度 = 卡片宽度 × radio。也就是说画面按快照自身比例显示，但宽高比最多 16:9；
+     * 这套规则里没有任何“横屏 / 竖屏”分支，两个方向走的是同一份代码。
+     *
+     * @return 快照的 ratio；缓存里还没有快照时返回 -1。
+     */
+    public static float snapshotAspect(Object floatHandleInfo) {
+        int taskId = readTaskId(floatHandleInfo);
+        Bitmap cached = taskId >= 0 ? sSnapshots.get(taskId) : null;
+        if (cached == null || cached.isRecycled()) {
+            Bitmap fromInfo = readInfoSnapshot(floatHandleInfo);
+            if (fromInfo != null && !fromInfo.isRecycled()) cached = fromInfo;
+        }
+        return aspectOf(cached);
+    }
+
+    /** 快照本身是不是横的（宽 > 高）。给「横屏应用画面按 9:16 显示」判断方向用。 */
+    public static boolean snapshotIsLandscape(Object floatHandleInfo) {
+        int taskId = readTaskId(floatHandleInfo);
+        Bitmap cached = taskId >= 0 ? sSnapshots.get(taskId) : null;
+        if (cached == null || cached.isRecycled()) {
+            Bitmap fromInfo = readInfoSnapshot(floatHandleInfo);
+            if (fromInfo != null && !fromInfo.isRecycled()) cached = fromInfo;
+        }
+        if (cached == null || cached.isRecycled()) return false;
+        return cached.getWidth() > 0 && cached.getWidth() > cached.getHeight();
+    }
+
+    private static float aspectOf(Bitmap src) {        if (sAspectOverride > 0f) return sAspectOverride;   // 画面比例已钉死
+        if (src == null || src.isRecycled() || src.getWidth() <= 0) return -1f;
+        // 用快照真实比例，不再压到 16:9。
+        // 压到 1.7778 时，比 16:9 更长的快照（如 720×1568 = 2.18）会得到一个比画面更宽的框，
+        // FIT 之后画面左右留白、看起来整体偏右，和卡片标题行「图标 → 三点」对不齐。
+        // 真实比例建框 → 画面正好铺满框，左右边缘就落在那两处参照线上。
+        float a = src.getHeight() / (float) src.getWidth();
+        return Math.min(2.6f, a);   // 只防极端值，正常竖屏快照 1.7~2.2
+    }
+
+    /** 卡片高度的最终裁决者：由坞窗那边注入，用来给官方比例加上“不超过可视区”的上限。 */
+    public interface HeightPolicy {
+        int heightFor(int width, float aspect);
+    }
+
+    private static volatile HeightPolicy sHeightPolicy;
+
+    public static void setHeightPolicy(HeightPolicy policy) {
+        sHeightPolicy = policy;
+    }
+
+    /** 按官方公式算高度，再交给坞窗注入的策略做上限裁剪。 */
+    public static int computeHeight(int width, float aspect) {
+        if (width <= 0 || aspect <= 0f) return 0;
+        HeightPolicy policy = sHeightPolicy;
+        if (policy != null) {
+            int h = policy.heightFor(width, aspect);
+            if (h > 0) return h;
+        }
+        return (int) (width * aspect);
+    }
+
     private static void applyRoundedBitmap(ImageView preview, Bitmap src, float radius) {
         if (src == null || src.isRecycled()) return;
+        // 官方 Lively 的定高规则：高度 = 宽度 × min(16:9, h/w)，再由坞窗策略限制最大高度。
+        // 高度一变就先把图挂到 tag 上等下一次 layout，layout 完成后按新尺寸裁圆角，
+        // 否则会拿旧尺寸裁图、画面被拉伸。
+        ViewGroup.LayoutParams lp = preview.getLayoutParams();
+        if (lp != null && lp.width > 0) {
+            int target = computeHeight(lp.width, aspectOf(src));
+            if (target > 0 && lp.height != target) {
+                lp.height = target;
+                preview.setTag(src);
+                preview.setLayoutParams(lp);
+                return;
+            }
+        }
         int w = preview.getWidth();
         int h = preview.getHeight();
         if (w <= 0 || h <= 0) {
@@ -347,6 +740,7 @@ public final class LivelyHook {
             preview.setImageBitmap(src);
             return;
         }
+        log("preview laid out " + w + "x" + h + " src=" + src.getWidth() + "x" + src.getHeight());
         preview.setImageBitmap(roundCrop(src, w, h, radius));
     }
 
@@ -354,16 +748,27 @@ public final class LivelyHook {
         Bitmap out = Bitmap.createBitmap(w, h, Bitmap.Config.ARGB_8888);
         Canvas canvas = new Canvas(out);
         Paint paint = new Paint(Paint.ANTI_ALIAS_FLAG | Paint.FILTER_BITMAP_FLAG);
-        float scale = Math.max(w / (float) src.getWidth(), h / (float) src.getHeight());
-        float dx = (w - src.getWidth() * scale) * 0.5f;
-        float dy = (h - src.getHeight() * scale) * 0.5f;
+        // 原先是 Math.max（CENTER_CROP），画面会被裁掉边缘；这里改成 Math.min 完整装下，
+        // 剩余空间居中留空，横屏应用、竖屏应用都能看到整幅画面。
+        float scale = Math.min(w / (float) src.getWidth(), h / (float) src.getHeight());
+        if (sFillMode) {
+            scale = Math.max(w / (float) src.getWidth(), h / (float) src.getHeight());
+        }
+        float dw = src.getWidth() * scale;
+        float dh = src.getHeight() * scale;
+        float dx = (w - dw) * 0.5f;
+        float dy = (h - dh) * 0.5f;
         Matrix matrix = new Matrix();
         matrix.setScale(scale, scale);
         matrix.postTranslate(dx, dy);
         BitmapShader shader = new BitmapShader(src, Shader.TileMode.CLAMP, Shader.TileMode.CLAMP);
         shader.setLocalMatrix(matrix);
         paint.setShader(shader);
-        canvas.drawRoundRect(0, 0, w, h, radius, radius, paint);
+        if (sFillMode) {
+            canvas.drawRoundRect(0f, 0f, w, h, radius, radius, paint);
+        } else {
+            canvas.drawRoundRect(dx, dy, dx + dw, dy + dh, radius, radius, paint);
+        }
         return out;
     }
 
@@ -673,37 +1078,61 @@ public final class LivelyHook {
         }
     }
 
+    /**
+     * 抓某一层的画面（LayerCaptureArgs）。
+     *
+     * <p>宿主类在不同 ROM / 版本上不一样：
+     * Android 14–16（realme UI 7 等）在 {@code android.window.ScreenCapture}；
+     * Android 17（ColorOS 17）把 LayerCaptureArgs 挪到了
+     * {@code android.window.ScreenCaptureInternal}，而 {@code ScreenCapture} 只剩新的
+     * {@code ScreenCaptureParams}。旧代码只查前一个宿主，于是在 A17 上永远
+     * “LayerCaptureArgs.Builder missing”、抓图返回 null —— 卡片空白/延迟就出在这里。
+     * 这里两个宿主都试一遍。
+     */
     private static Object captureLayers(ClassLoader cl, SurfaceControl sc) {
-        try {
-            Class<?> screenCapture = Class.forName("android.window.ScreenCapture", false,
-                    cl != null ? cl : SurfaceControl.class.getClassLoader());
-            Class<?> argsCl = null;
-            Class<?> builderCl = null;
-            for (Class<?> inner : screenCapture.getDeclaredClasses()) {
-                if ("LayerCaptureArgs".equals(inner.getSimpleName())) {
+        ClassLoader loader = cl != null ? cl : SurfaceControl.class.getClassLoader();
+        String[] hosts = {"android.window.ScreenCapture", "android.window.ScreenCaptureInternal"};
+        for (String hostName : hosts) {
+            Class<?> hostCl;
+            try {
+                hostCl = Class.forName(hostName, false, loader);
+            } catch (Throwable t) {
+                log(hostName + " not present");
+                continue;
+            }
+            try {
+                Class<?> argsCl = null;
+                Class<?> builderCl = null;
+                for (Class<?> inner : hostCl.getDeclaredClasses()) {
+                    if (!"LayerCaptureArgs".equals(inner.getSimpleName())) continue;
                     argsCl = inner;
                     for (Class<?> b : inner.getDeclaredClasses()) {
                         if ("Builder".equals(b.getSimpleName())) builderCl = b;
                     }
                 }
-            }
-            if (builderCl != null) {
-                Constructor<?> ctor = builderCl.getConstructor(SurfaceControl.class);
-                Object builder = ctor.newInstance(sc);
+                if (builderCl == null) {
+                    log(hostName + ": LayerCaptureArgs.Builder missing");
+                    continue;
+                }
+                Object builder = builderCl.getConstructor(SurfaceControl.class).newInstance(sc);
                 try {
                     builderCl.getMethod("setCaptureSecureLayers", boolean.class).invoke(builder, true);
                 } catch (Throwable ignored) {
                 }
                 Object args = builderCl.getMethod("build").invoke(builder);
-                Method cap = screenCapture.getMethod("captureLayers", argsCl);
+                Method cap = hostCl.getMethod("captureLayers", argsCl);
                 cap.setAccessible(true);
                 Object r = cap.invoke(null, args);
-                log("captureLayers(LayerCaptureArgs) -> "
+                log(hostName + " captureLayers -> "
                         + (r == null ? "null" : r.getClass().getSimpleName()));
                 if (r != null) return r;
-            } else {
-                log("LayerCaptureArgs.Builder missing");
+            } catch (Throwable t) {
+                log(hostName + " captureLayers err " + t);
             }
+        }
+        // 最后再试无参形态的老接口
+        try {
+            Class<?> screenCapture = Class.forName("android.window.ScreenCapture", false, loader);
             for (Method m : screenCapture.getDeclaredMethods()) {
                 if (!"captureLayers".equals(m.getName())) continue;
                 Class<?>[] p = m.getParameterTypes();
@@ -716,17 +1145,33 @@ public final class LivelyHook {
                             && p[1] == Rect.class && p[2] == float.class) {
                         r = m.invoke(null, sc, new Rect(), 1.0f);
                     }
-                    log(m.getName() + sig(m) + " -> "
+                    log("legacy captureLayers " + sig(m) + " -> "
                             + (r == null ? "null" : r.getClass().getSimpleName()));
                     if (r != null) return r;
                 } catch (Throwable t) {
-                    log(m.getName() + sig(m) + " err " + t.getMessage());
+                    log("legacy captureLayers err " + t.getMessage());
                 }
             }
         } catch (Throwable t) {
-            log("captureLayers " + t);
+            log("legacy captureLayers " + t);
         }
         return null;
+    }
+
+    /**
+     * 该应用当前画面是不是竖着的（高 > 宽）。
+     *
+     * 坞窗布局用它在横屏下识别「竖屏应用」，给这类卡片多留一点边。读取顺序与 createPreview
+     * 一致：先查已抓到的快照，再退回 FloatHandleInfo 自带的截图，都拿不到就按横屏处理。
+     */
+    public static boolean isPortraitContent(Object floatHandleInfo) {
+        try {
+            Bitmap b = sSnapshots.get(readTaskId(floatHandleInfo));
+            if (b == null || b.isRecycled()) b = readInfoSnapshot(floatHandleInfo);
+            return b != null && !b.isRecycled() && b.getHeight() > b.getWidth();
+        } catch (Throwable t) {
+            return false;
+        }
     }
 
     private static Bitmap readInfoSnapshot(Object info) {

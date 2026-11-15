@@ -17,7 +17,14 @@
     <string name="keep_alive_title">贴边保活</string>
     <string name="keep_alive_desc">收成贴边浮标后应用不暂停、保持后台运行；下载和挂机不会中断，会略微增加耗电</string>
 
+    <string name="unlock_limit_title">解除最小化数量上限</string>
+    <string name="unlock_limit_desc">系统默认最多同时保留 2 个最小化应用，打开后放宽到 12 个（重启手机生效）</string>
+
     <string name="settings_hint">开关会记住你的选择，重启手机后保持上次状态。改开关后重新打开自由小窗即可生效</string>
+
+    <string name="dev_options_title">开发者选项</string>
+    <string name="dev_auto_wireless_adb_title">开机自动打开无线调试</string>
+    <string name="dev_auto_wireless_adb_desc">开机首次解锁后自动把系统「无线调试」打开，省去每次手动点开关；端口仍由系统随机分配，仅建议在可信局域网使用</string>
 
     <string name="theme_to_dark">深色</string>
     <string name="theme_to_light">浅色</string>

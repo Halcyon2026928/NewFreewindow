@@ -47,9 +47,6 @@ final class FloatKeepAliveHook {
         STOP_STATES.add("STOPPED");
     }
 
-    /** Display.STATE_OFF */
-    private static final int DISPLAY_STATE_OFF = 1;
-
     /** 配置缓存：判定路径高频调用，最多每 2 秒重读一次开关。 */
     private static final long CONFIG_TTL_MS = 2000L;
 
@@ -97,44 +94,15 @@ final class FloatKeepAliveHook {
     private static boolean installRecordHooks() {
         boolean hooked = false;
 
-        // 1) makeInvisible(): 浮标任务不参与可见性收尾，保持 visibleRequested。
-        hooked |= hookAllSafe(sRecordClass, "makeInvisible", new XC_MethodHook() {
-            @Override
-            protected void beforeHookedMethod(MethodHookParam param) {
-                try {
-                    if (shouldKeepVisible(param.thisObject)) {
-                        logSkip(param.thisObject, "invisible");
-                        param.setResult(null);
-                    } else if (shouldKeep(param.thisObject)) {
-                        logRelease(param.thisObject, "invisible");
-                    }
-                } catch (Throwable t) {
-                    XposedBridge.log(TAG + " makeInvisible hook error: " + t.getMessage());
-                }
-            }
-        });
-
-        // 2) setVisibleRequested(boolean): 拒绝把浮标任务改回不可见，按可见继续执行。
-        hooked |= hookAllSafe(sRecordClass, "setVisibleRequested", new XC_MethodHook() {
-            @Override
-            protected void beforeHookedMethod(MethodHookParam param) {
-                try {
-                    if (param.args.length != 1) return;
-                    Object arg = param.args[0];
-                    if (!(arg instanceof Boolean)) return;
-                    if (((Boolean) arg) || !shouldKeepVisible(param.thisObject)) {
-                        if (!((Boolean) arg) && shouldKeep(param.thisObject)) {
-                            logRelease(param.thisObject, "visible_requested");
-                        }
-                        return;
-                    }
-                    logSkip(param.thisObject, "visible_requested");
-                    param.args[0] = Boolean.TRUE;
-                } catch (Throwable t) {
-                    XposedBridge.log(TAG + " setVisibleRequested hook error: " + t.getMessage());
-                }
-            }
-        });
+        // 【已移除】makeInvisible()（原来 return null 跳过）与 setVisibleRequested(false)
+        // （原来把 false 改成 true）这两条可见性钩子。
+        //
+        // 它们会让浮标任务一直停在"我要可见"，于是 WMS 认为任务是可见的、Surface 保持
+        // shown=true，横屏贴边后回到桌面就留下一层满屏、点不动的固定窗口。实测证据：
+        //   Window{...uuremote}: isVisible=true   isOnScreen=false   isVisibleRequested()=false
+        //   Surface: shown=true  mDrawState=HAS_DRAWN
+        //   Task #19856: visible=true  visibleRequested=false（全场唯一 visible=true 的任务）
+        // 保活只需要「不被暂停 / 不被停止」，不需要「一直可见」，所以这两条不再拦截。
 
         // 3) setState(State, String): 挡住到 STOPPING/STOPPED 的迁移。
         hooked |= hookAllSafe(sRecordClass, "setState", new XC_MethodHook() {
@@ -341,30 +309,6 @@ final class FloatKeepAliveHook {
         }
     }
 
-    /**
-     * 可见性两道钩子只在「屏幕亮着且没锁屏」时生效。
-     *
-     * 锁屏时原厂会把全场窗口刷成不可见，这时如果继续把浮标任务按成「可见」，
-     * 窗口管理器会在锁屏过渡里把浮标变回窗口显示在锁屏上。放开可见性只是让窗口
-     * 消失，暂停/停止照样拦着，应用仍在跑。
-     */
-    private static boolean shouldKeepVisible(Object record) {
-        return shouldKeep(record) && !isDisplayLockedOrOff(record);
-    }
-
-    private static boolean isDisplayLockedOrOff(Object record) {
-        Object display = callNoArg(record, "getDisplayContent");
-        if (display == null) return false;
-        Object policy = callNoArg(display, "getDisplayPolicy");
-        if (policy != null) {
-            if (Boolean.TRUE.equals(callNoArg(policy, "isKeyguardShowing"))) return true;
-            if (Boolean.FALSE.equals(readField(policy, "mAwake"))) return true;
-        }
-        Object displayInfo = readField(display, "mDisplayInfo");
-        Object state = readField(displayInfo, "state");
-        return state instanceof Integer && (Integer) state == DISPLAY_STATE_OFF;
-    }
-
     private static boolean keepAliveEnabled() {
         long now = SystemClock.uptimeMillis();
         if (now - sConfigReadAt < CONFIG_TTL_MS) return sEnabled;
@@ -414,11 +358,6 @@ final class FloatKeepAliveHook {
         if (sLoggedTasks.putIfAbsent(taskId, Boolean.TRUE) == null) {
             XposedBridge.log(TAG + " keep task" + taskId + " (" + reason + ")");
         }
-    }
-
-    private static void logRelease(Object record, String reason) {
-        int taskId = taskIdOf(record);
-        XposedBridge.log(TAG + " release task" + taskId + " (" + reason + ")");
     }
 
     private static int taskIdOf(Object record) {
