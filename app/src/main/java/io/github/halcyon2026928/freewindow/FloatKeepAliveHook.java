@@ -116,7 +116,7 @@ final class FloatKeepAliveHook {
 
     private static Handler sHandler;
 
-    private static final ConcurrentHashMap<Integer, Boolean> sLoggedTasks = new ConcurrentHashMap<>();
+    private static final ConcurrentHashMap<String, Boolean> sLoggedTasks = new ConcurrentHashMap<>();
     private static final ConcurrentHashMap<String, Boolean> sLogOnce = new ConcurrentHashMap<>();
 
     /** 不同 ROM 的 token 字段名不一致，按候选顺序探测。 */
@@ -537,18 +537,31 @@ final class FloatKeepAliveHook {
                     if (param.args.length < 4) return;
                     if (((Method) param.method).getReturnType() != Integer.TYPE) return;
                     Object targetTask = param.args[3];
-                    if (targetTask == null) return;
-                    int taskId = taskIdOfObject(targetTask);
-                    if (taskId <= 0 || !isFloating(taskId)) return;
                     Object sourceRecord = param.args[1];
-                    if (sourceRecord == null) return;
-                    Object sourceTask = readField(sourceRecord, "task");
-                    if (sourceTask == null) sourceTask = readField(sourceRecord, "mTask");
-                    // 只在「同一个 task 内起新页面」时接管；跨 task 的正常跳转照原样走。
-                    if (sourceTask == null || sourceTask != targetTask) return;
-                    logOnce("adjust_" + taskId,
-                            "task" + taskId + " 同 task 内起新页面，保持浮标（不排成小窗）");
-                    param.setResult(Integer.valueOf(4));
+                    int targetId = taskIdOfObject(targetTask);
+                    int sourceId = -1;
+                    if (sourceRecord != null) {
+                        Object sourceTask = readField(sourceRecord, "task");
+                        if (sourceTask == null) sourceTask = readField(sourceRecord, "mTask");
+                        sourceId = taskIdOfObject(sourceTask);
+                    }
+                    boolean floatInvolved = (targetId > 0 && isFloating(targetId))
+                            || (sourceId > 0 && isFloating(sourceId));
+                    if (!floatInvolved) return;
+                    Object result = param.getResult();
+                    boolean targetVisible = Boolean.TRUE.equals(callNoArg(targetTask, "isVisible"));
+                    boolean sourceVisibleReq = Boolean.TRUE.equals(readField(sourceRecord, "mVisibleRequested"));
+                    String startName = "null";
+                    Object startActivity = param.args[2];
+                    if (startActivity != null) {
+                        Object shortName = readField(startActivity, "shortComponentName");
+                        if (shortName instanceof String) startName = (String) shortName;
+                    }
+                    XposedBridge.log(TAG + " adjustOptions reason=" + result
+                            + " srcTask=" + sourceId + " tgtTask=" + targetId
+                            + " tgtVisible=" + targetVisible
+                            + " srcVisibleReq=" + sourceVisibleReq
+                            + " start=" + startName);
                 } catch (Throwable t) {
                     XposedBridge.log(TAG + " isAllowedToAdjustOptions hook error: " + t.getMessage());
                 }
@@ -586,8 +599,8 @@ final class FloatKeepAliveHook {
                     if (!(sourcePkg instanceof String) || !(startPkg instanceof String)) return;
                     if (!sourcePkg.equals(startPkg)) return;
                     logOnce("floatjump_" + taskId,
-                            "task" + taskId + " 浮标内起新页面（" + startPkg + "），保持原样不排小窗");
-                    param.setResult(rawOptions);
+                            "task" + taskId + " 浮标内起新页面（" + startPkg + "），观察原厂怎样排窗口");
+                    // 这里**不能**把 options 原样返回：那等于不给新页面任何窗口信息，会全屏展开。
                 } catch (Throwable t) {
                     XposedBridge.log(TAG + " adjustOptionsForFlexibleTask hook error: " + t.getMessage());
                 }
@@ -1266,7 +1279,9 @@ final class FloatKeepAliveHook {
 
     private static void logSkip(Object record, String reason) {
         int taskId = taskIdOf(record);
-        if (sLoggedTasks.putIfAbsent(Integer.valueOf(taskId), Boolean.TRUE) == null) {
+        // 按 taskId+reason 去重：同一个任务上 pause / invisible / visible_requested 都要各自留一行，
+        // 否则第一条（pause）会把后面几条吞掉，出问题时看不到可见性那两道路过没有。
+        if (sLoggedTasks.putIfAbsent(taskId + "/" + reason, Boolean.TRUE) == null) {
             XposedBridge.log(TAG + " keep task" + taskId + " (" + reason + ")");
         }
     }
