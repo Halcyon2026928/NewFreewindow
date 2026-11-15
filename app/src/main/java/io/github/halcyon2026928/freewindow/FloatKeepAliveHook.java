@@ -165,31 +165,34 @@ final class FloatKeepAliveHook {
     // ==================== ActivityRecord 上的保护 ====================
 
     /**
-     * 浮标任务上的四项保护：可见性收尾、visibleRequested、状态迁移、停止、暂停超时。
+     * 浮标任务上的保护：状态迁移、停止、暂停、暂停超时。
      *
-     * 可见性两条必须配合 shouldKeepVisible 一起用：只在「屏幕亮着且没锁屏、也不在
-     * 旋转/解锁过渡」时把任务按成可见；锁屏、旋转、解锁过渡时一律放行，否则窗口管理
-     * 会把带浮标裁切的表面提交到锁屏上，或者解锁后把整块迷你窗弹出来。
+     * 可见性（makeInvisible / setVisibleRequested）本轮**只观测不改写**：
+     * 把浮标任务强行按成「可见」后，应用自己在跑的场景（例如红果换集起新 Activity）
+     * 会被窗口管理器当成可见任务重新提交，浮标直接展开成小窗——实测 3820 就是这么弹的。
+     * 所以这里放行系统自己的可见性收尾，进程档位改由 setState/addToStopping/pauseSkip
+     * 维持；播放不停由后面的音频焦点、亮屏伪装、息屏广播、Display/Keyguard 与 doze
+     * 白名单负责，那几条都不依赖「任务必须可见」。
      */
     private static boolean installRecordHooks() {
         boolean hooked = false;
 
-        // 1) makeInvisible(): 浮标任务跳过可见性收尾。
+        // 1) makeInvisible(): 只观测，不拦截。系统该收尾就收尾，窗口才不会被抬起来。
         hooked |= hookAllSafe(sRecordClass, "makeInvisible", new XC_MethodHook() {
             @Override
             protected void beforeHookedMethod(MethodHookParam param) {
                 try {
                     if (((Method) param.method).getReturnType() != Void.TYPE) return;
-                    if (!shouldKeepVisible(param.thisObject)) return;
-                    logSkip(param.thisObject, "invisible");
-                    param.setResult(null);
+                    if (!shouldKeep(param.thisObject)) return;
+                    logOnce("invisible_" + taskIdOf(param.thisObject),
+                            "task" + taskIdOf(param.thisObject) + " makeInvisible (放行，系统收尾)");
                 } catch (Throwable t) {
                     XposedBridge.log(TAG + " makeInvisible hook error: " + t.getMessage());
                 }
             }
         });
 
-        // 2) setVisibleRequested(boolean): 不放回 false，但过渡期间放行。
+        // 2) setVisibleRequested(boolean): 同样不拦截，只记录「谁把浮标任务抬成可见」。
         hooked |= hookAllSafe(sRecordClass, "setVisibleRequested", new XC_MethodHook() {
             @Override
             protected void beforeHookedMethod(MethodHookParam param) {
@@ -198,16 +201,13 @@ final class FloatKeepAliveHook {
                     Boolean visible = (Boolean) param.args[0];
                     if (visible == null) return;
                     if (!visible.booleanValue()) {
-                        if (shouldKeepVisible(param.thisObject)) {
-                            param.args[0] = Boolean.TRUE;
-                            logSkip(param.thisObject, "visible_requested");
-                        } else if (shouldKeep(param.thisObject)) {
+                        if (shouldKeep(param.thisObject)) {
                             logOnce("release_" + taskIdOf(param.thisObject),
-                                    "release task" + taskIdOf(param.thisObject) + " visible_requested");
+                                    "task" + taskIdOf(param.thisObject) + " visibleRequested -> false (放行)");
                         }
                     } else if (shouldKeep(param.thisObject)) {
                         logOnce("raised_" + taskIdOf(param.thisObject),
-                                "raised task" + taskIdOf(param.thisObject) + " visible_requested");
+                                "task" + taskIdOf(param.thisObject) + " visibleRequested -> true (被抬起)");
                     }
                 } catch (Throwable t) {
                     XposedBridge.log(TAG + " setVisibleRequested hook error: " + t.getMessage());
@@ -1009,10 +1009,10 @@ final class FloatKeepAliveHook {
     }
 
     /**
-     * 可见性两道钩子只在「屏幕亮着且没锁屏、也不在旋转/解锁过渡」时生效。
-     *
-     * 锁屏时如果仍把浮标任务按成可见，窗口管理器会把任务表面（带浮标裁切）显示出来，
-     * 锁屏上就能看到一小块迷你窗；放开可见性则只留浮标，暂停/停止照样拦着。
+     * 可见性放行判定的历史实现，当前策略不再使用（见 installRecordHooks 注释）：
+     * 把浮标任务按成可见会让应用起来的新页面把浮标展成小窗，所以这里只放行。
+     * 保留函数与 isDisplayLockedOrOff 是为了下一轮如果要恢复「只在锁屏时保持可见」
+     * 的折中方案时有现成的判定可用。
      */
     private static boolean shouldKeepVisible(Object record) {
         return shouldKeep(record)
