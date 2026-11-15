@@ -219,14 +219,26 @@ final class FloatKeepAliveHook {
                     boolean visible = ((Boolean) arg).booleanValue();
                     if (!shouldKeep(param.thisObject)) return;
                     if (visible) {
-                        if (SystemClock.uptimeMillis() < sUserFloatOpenAt) {
+                        long now = SystemClock.uptimeMillis();
+                        if (now < sUserFloatOpenAt) {
                             logOnce("useropen_" + taskIdOf(param.thisObject),
                                     "task" + taskIdOf(param.thisObject) + " 用户从浮标打开，放行可见");
                             return;
                         }
-                        param.args[0] = Boolean.FALSE;
-                        logOnce("deny_raised_" + taskIdOf(param.thisObject),
-                                "task" + taskIdOf(param.thisObject) + " 拒绝抬成可见（浮标保持）");
+                        /*
+                         * 只在「应用自己刚起了新页面」那一小段里拒绝可见性。
+                         * 长期拒绝会让任务的窗口状态和输入焦点对不上：锁屏解锁后调音量，
+                         * 输入派发找不到聚焦窗口 → ANR → 应用被杀（3820 03:20 / 03:21 两次）。
+                         * 其余时间里系统怎么提交就怎么提交，不做干预。
+                         */
+                        if (now < sSuppressFloatEjectAt) {
+                            param.args[0] = Boolean.FALSE;
+                            logOnce("deny_raised_" + taskIdOf(param.thisObject),
+                                    "task" + taskIdOf(param.thisObject) + " 拒绝抬成可见（浮标保持）");
+                        } else {
+                            logOnce("pass_raised_" + taskIdOf(param.thisObject),
+                                    "task" + taskIdOf(param.thisObject) + " 抬成可见（放行）");
+                        }
                     } else {
                         logSkip(param.thisObject, "visible_requested_false");
                     }
@@ -246,7 +258,9 @@ final class FloatKeepAliveHook {
                     Object arg = param.args[0];
                     if (!(arg instanceof Boolean) || !((Boolean) arg).booleanValue()) return;
                     if (!shouldKeep(param.thisObject)) return;
-                    if (SystemClock.uptimeMillis() < sUserFloatOpenAt) return;
+                    long now = SystemClock.uptimeMillis();
+                    if (now < sUserFloatOpenAt) return;
+                    if (now >= sSuppressFloatEjectAt) return;
                     param.args[0] = Boolean.FALSE;
                     logOnce("deny_visibility_" + taskIdOf(param.thisObject),
                             "task" + taskIdOf(param.thisObject) + " 拒绝提交可见性（浮标保持）");
