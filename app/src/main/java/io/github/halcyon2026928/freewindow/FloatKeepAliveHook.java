@@ -168,35 +168,32 @@ final class FloatKeepAliveHook {
     /**
      * 浮标任务上的保护：状态迁移、停止、暂停、暂停超时。
      *
-     * 可见性两条照上游 2.3.10 的做法：亮屏、未锁、不在旋转/解锁守卫里时，
-     * `makeInvisible()` 跳过、`setVisibleRequested(false)` 改成 `true` 后继续执行。
-     * 这样 ActivityRecord 维持「可见但未置顶」，进程留在 perceptible 档；
-     * 窗口本身仍由原厂隐藏，用户只看到浮标。
+     * 可见性两条**只观测、不改写**（3820 实测结论）：
+     * 把浮标任务按成「可见」后，系统会把它当可见任务重新提交窗口，应用一起来新页面
+     * 就会弹出系统的自由小窗；放行由系统自己收尾反而更接近原厂形态。
+     * 进程档位由 setState / addToStopping / pauseSkip 维持，播不中断由音频焦点、亮屏
+     * 伪装、息屏广播、Display/Keyguard 伪装和 doze 白名单负责，都不依赖「任务可见」。
      *
-     * 注意必须是「改参数继续执行」，不能直接跳过原方法：跳过会让原厂的可见性收尾走不完，
-     * 之后任务被重新提交时窗口以未裁剪的直角形态弹出来（旧版本实测就是直角小窗）。
-     *
-     * 锁屏/息屏、旋转过渡、解锁瞬间一律放行，避免窗口在这些时刻被重新显示出来。
+     * 弹窗问题改在 `isAllowedToAdjustOptions` 上处理（见 installAdjustOptionsGuard）。
      */
     private static boolean installRecordHooks() {
         boolean hooked = false;
 
-        // 1) makeInvisible(): 保活中的浮标任务跳过这次可见性收尾。
+        // 1) makeInvisible(): 只观测，不拦截。系统该收尾就收尾，窗口才不会被抬起来。
         hooked |= hookAllSafe(sRecordClass, "makeInvisible", new XC_MethodHook() {
             @Override
             protected void beforeHookedMethod(MethodHookParam param) {
                 try {
                     if (((Method) param.method).getReturnType() != Void.TYPE) return;
-                    if (!shouldKeepVisible(param.thisObject)) return;
+                    if (!shouldKeep(param.thisObject)) return;
                     logSkip(param.thisObject, "invisible");
-                    param.setResult(null);
                 } catch (Throwable t) {
                     XposedBridge.log(TAG + " makeInvisible hook error: " + t.getMessage());
                 }
             }
         });
 
-        // 2) setVisibleRequested(boolean): false 改成 true 继续执行（不是跳过原方法）。
+        // 2) setVisibleRequested(boolean): 同样只观测，记录可见性被谁改成什么。
         hooked |= hookAllSafe(sRecordClass, "setVisibleRequested", new XC_MethodHook() {
             @Override
             protected void beforeHookedMethod(MethodHookParam param) {
@@ -205,15 +202,12 @@ final class FloatKeepAliveHook {
                     Object arg = param.args[0];
                     if (!(arg instanceof Boolean)) return;
                     boolean visible = ((Boolean) arg).booleanValue();
-                    if (!visible && shouldKeepVisible(param.thisObject)) {
-                        logSkip(param.thisObject, "visible_requested");
-                        param.args[0] = Boolean.TRUE;
-                    } else if (!visible && shouldKeep(param.thisObject)) {
-                        logOnce("release_" + taskIdOf(param.thisObject),
-                                "task" + taskIdOf(param.thisObject) + " visibleRequested -> false (放行)");
-                    } else if (visible && shouldKeep(param.thisObject)) {
+                    if (!shouldKeep(param.thisObject)) return;
+                    if (visible) {
                         logOnce("raised_" + taskIdOf(param.thisObject),
                                 "task" + taskIdOf(param.thisObject) + " visibleRequested -> true (被抬起)");
+                    } else {
+                        logSkip(param.thisObject, "visible_requested_false");
                     }
                 } catch (Throwable t) {
                     XposedBridge.log(TAG + " setVisibleRequested hook error: " + t.getMessage());
@@ -562,6 +556,28 @@ final class FloatKeepAliveHook {
                             + " tgtVisible=" + targetVisible
                             + " srcVisibleReq=" + sourceVisibleReq
                             + " start=" + startName);
+
+                    /*
+                     * 拦：来源就在保活浮标里，新页面又是同一个应用自己的（首页换集、进全集、
+                     * 点「观看完整短剧」都属于这种），一律按原厂「同 task 内正常启动」的语义
+                     * 返回 4。reason 4 不进任何窗口调整分支（走 skip adjust options），
+                     * 新页面沿用原 task 的窗口继续跑，浮标不会被展开成小窗或全屏。
+                     *
+                     * 不能在这一层直接放回原 options——那等于不给新页面任何窗口信息，会全屏。
+                     * 也不能只认「同 task」：实测首页换集时 target 是新建 task，同 task 条件不成立。
+                     */
+                    if (sourceId > 0 && isFloating(sourceId) && startActivity != null) {
+                        Object sourcePkg = readField(sourceRecord, "packageName");
+                        Object startPkg = readField(startActivity, "packageName");
+                        if (sourcePkg instanceof String && sourcePkg.equals(startPkg)
+                                && !(result instanceof Integer && ((Integer) result).intValue() == 4)) {
+                            XposedBridge.log(TAG + " task" + sourceId + " 浮标内起新页面，reason "
+                                    + result + " -> 4（沿用原 task 窗口）");
+                        }
+                        if (sourcePkg instanceof String && sourcePkg.equals(startPkg)) {
+                            param.setResult(Integer.valueOf(4));
+                        }
+                    }
                 } catch (Throwable t) {
                     XposedBridge.log(TAG + " isAllowedToAdjustOptions hook error: " + t.getMessage());
                 }
