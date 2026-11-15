@@ -22,6 +22,15 @@
 
     <string name="settings_hint">开关会记住你的选择，重启手机后保持上次状态。改开关后重新打开自由小窗即可生效</string>
 
+    <string name="donate_title">支持开发者</string>
+    <string name="donate_desc">如果这个模块帮到了你，欢迎请作者喝一杯咖啡；每一份支持都会变成下一次打磨的动力</string>
+    <string name="donate_action">捐赠</string>
+    <string name="donate_dialog_title">支持灵动坞OS</string>
+    <string name="donate_dialog_msg">如果灵动坞OS 让你的多任务顺手了一点，欢迎请作者喝杯咖啡。\n\n每一次捐赠都会变成下一次迭代的动力——悬浮球、坞窗、保活这些细节都是一点点磨出来的，你的支持让我有更多时间继续折腾它们。\n\n捐赠完全自愿，所有功能永久免费。</string>
+    <string name="donate_dialog_close">关闭</string>
+    <string name="donate_qr_desc">微信 / 支付宝 扫一扫</string>
+    <string name="donate_reward_desc">支付宝扫码领红包，天天有优惠</string>
+
     <string name="dev_options_title">开发者选项</string>
     <string name="dev_auto_wireless_adb_title">开机自动打开无线调试</string>
     <string name="dev_auto_wireless_adb_desc">开机首次解锁后自动把系统「无线调试」打开，省去每次手动点开关；端口仍由系统随机分配，仅建议在可信局域网使用</string>

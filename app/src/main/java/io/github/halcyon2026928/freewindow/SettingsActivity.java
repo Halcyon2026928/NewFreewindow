@@ -1,15 +1,20 @@
 package io.github.halcyon2026928.freewindow;
 
 import android.app.Activity;
+import android.app.AlertDialog;
 import android.content.Context;
 import android.graphics.Color;
 import android.os.Build;
 import android.os.Bundle;
+import android.view.Gravity;
 import android.view.View;
 import android.view.Window;
 import android.widget.CompoundButton;
 import android.widget.ImageView;
+import android.widget.LinearLayout;
+import android.widget.ScrollView;
 import android.widget.Switch;
+import android.widget.TextView;
 
 /**
  * freewindow 设置界面。
@@ -110,6 +115,86 @@ public class SettingsActivity extends Activity {
                 writePref(KEY_UNLOCK_LIMIT, isChecked);
             }
         });
+
+        // 捐赠入口：整张卡片可点，点开弹出收款码
+        View donateCard = findViewById(R.id.card_donate);
+        if (donateCard != null) {
+            donateCard.setOnClickListener(new View.OnClickListener() {
+                @Override
+                public void onClick(View v) {
+                    showDonateDialog();
+                }
+            });
+        }
+    }
+
+    /**
+     * 捐赠弹窗：一张图同时含微信 / 支付宝收款码，配一段「有捐赠就有动力」的说明。
+     * 内容整体交给 ScrollView，图片在小屏上按宽度自适应，保证二维码扫得出来。
+     */
+    private void showDonateDialog() {
+        try {
+            float density = getResources().getDisplayMetrics().density;
+            int pad = (int) (18 * density);
+
+            LinearLayout box = new LinearLayout(this);
+            box.setOrientation(LinearLayout.VERTICAL);
+            box.setPadding(pad, pad, pad, 0);
+
+            TextView msg = new TextView(this);
+            msg.setText(R.string.donate_dialog_msg);
+            msg.setTextSize(13);
+            msg.setLineSpacing(0f, 1.3f);
+            box.addView(msg);
+
+            ImageView qr = new ImageView(this);
+            qr.setImageResource(R.drawable.donate_qr);
+            qr.setAdjustViewBounds(true);
+            qr.setScaleType(ImageView.ScaleType.FIT_CENTER);
+            LinearLayout.LayoutParams qrParams = new LinearLayout.LayoutParams(
+                    LinearLayout.LayoutParams.MATCH_PARENT, LinearLayout.LayoutParams.WRAP_CONTENT);
+            qrParams.topMargin = pad;
+            box.addView(qr, qrParams);
+
+            TextView hint = new TextView(this);
+            hint.setText(R.string.donate_qr_desc);
+            hint.setTextSize(12);
+            hint.setGravity(Gravity.CENTER);
+            LinearLayout.LayoutParams hintParams = new LinearLayout.LayoutParams(
+                    LinearLayout.LayoutParams.MATCH_PARENT, LinearLayout.LayoutParams.WRAP_CONTENT);
+            hintParams.topMargin = pad / 2;
+            box.addView(hint, hintParams);
+
+            // 第二张：支付宝扫码领红包（互惠入口，不动代码也能支持一下）
+            ImageView reward = new ImageView(this);
+            reward.setImageResource(R.drawable.donate_reward);
+            reward.setAdjustViewBounds(true);
+            reward.setScaleType(ImageView.ScaleType.FIT_CENTER);
+            LinearLayout.LayoutParams rewardParams = new LinearLayout.LayoutParams(
+                    LinearLayout.LayoutParams.MATCH_PARENT, LinearLayout.LayoutParams.WRAP_CONTENT);
+            rewardParams.topMargin = pad;
+            box.addView(reward, rewardParams);
+
+            TextView rewardHint = new TextView(this);
+            rewardHint.setText(R.string.donate_reward_desc);
+            rewardHint.setTextSize(12);
+            rewardHint.setGravity(Gravity.CENTER);
+            LinearLayout.LayoutParams rewardHintParams = new LinearLayout.LayoutParams(
+                    LinearLayout.LayoutParams.MATCH_PARENT, LinearLayout.LayoutParams.WRAP_CONTENT);
+            rewardHintParams.topMargin = pad / 2;
+            box.addView(rewardHint, rewardHintParams);
+
+            ScrollView sv = new ScrollView(this);
+            sv.addView(box);
+
+            new AlertDialog.Builder(this)
+                    .setTitle(R.string.donate_dialog_title)
+                    .setView(sv)
+                    .setPositiveButton(R.string.donate_dialog_close, null)
+                    .show();
+        } catch (Throwable t) {
+            android.util.Log.w("freewindow", "showDonateDialog failed: " + t);
+        }
     }
 
     /**

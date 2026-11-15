@@ -284,6 +284,56 @@
             android:layout_marginStart="16dp" />
     </LinearLayout>
 
+    <!-- 卡片 6：支持开发者（捐赠入口） -->
+    <LinearLayout
+        android:id="@+id/card_donate"
+        android:layout_width="match_parent"
+        android:layout_height="wrap_content"
+        android:layout_marginTop="14dp"
+        android:background="?attr/fwCardBackground"
+        android:clickable="true"
+        android:focusable="true"
+        android:gravity="center_vertical"
+        android:orientation="horizontal"
+        android:padding="18dp">
+
+        <LinearLayout
+            android:layout_width="0dp"
+            android:layout_height="wrap_content"
+            android:layout_weight="1"
+            android:orientation="vertical">
+
+            <TextView
+                android:layout_width="wrap_content"
+                android:layout_height="wrap_content"
+                android:text="@string/donate_title"
+                android:textColor="?attr/fwTextPrimary"
+                android:textSize="16sp"
+                android:textStyle="bold" />
+
+            <TextView
+                android:layout_width="wrap_content"
+                android:layout_height="wrap_content"
+                android:layout_marginTop="3dp"
+                android:text="@string/donate_desc"
+                android:textColor="?attr/fwTextSecondary"
+                android:textSize="12sp" />
+        </LinearLayout>
+
+        <TextView
+            android:layout_width="wrap_content"
+            android:layout_height="wrap_content"
+            android:layout_marginStart="12dp"
+            android:background="@drawable/bg_pill"
+            android:paddingStart="14dp"
+            android:paddingTop="7dp"
+            android:paddingEnd="14dp"
+            android:paddingBottom="7dp"
+            android:text="@string/donate_action"
+            android:textColor="?attr/fwTextPrimary"
+            android:textSize="13sp" />
+    </LinearLayout>
+
     <!-- 开发者选项标题 -->
     <TextView
         android:layout_width="wrap_content"
