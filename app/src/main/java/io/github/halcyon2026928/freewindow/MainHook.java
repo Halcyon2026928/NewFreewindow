@@ -1771,18 +1771,21 @@ public class MainHook implements IXposedHookLoadPackage {
             menuContainer.addView(itemTv, itemParams);
         }
 
-        // 定位：贴在三点点按钮正下方居中，左右不超出屏幕。
-        // 菜单挂在**独立的 WindowManager 窗口**上，而不是坞窗容器里 —— 卡片画面是
-        // SurfaceView 且 setZOrderOnTop(true)，它只有在「同一个窗口内」才压过别的 View；
-        // 菜单放进坞窗容器就会被画面盖住。开成独立窗口后，后添加的窗口在同 type 内层级更高，
-        // 于是「菜单能遮画面、画面遮不住菜单」。
+        // 定位：贴在三点点按钮下方，但整体上提到卡片标题栏底部（画面顶边）附近，
+        // 菜单不再压住卡片标题行；左右不超出屏幕。
         int[] anchorLoc = new int[2];
         anchor.getLocationOnScreen(anchorLoc);
         int screenWidth = ctx.getResources().getDisplayMetrics().widthPixels;
         int left = anchorLoc[0] + anchor.getWidth() / 2 - menuWidth / 2;
         left = Math.max(dpToPx(ctx, 8), Math.min(left, screenWidth - menuWidth - dpToPx(ctx, 8)));
-        int top = anchorLoc[1] + anchor.getHeight() + dpToPx(ctx, 4);
+        // anchor 是三点按钮的可点区域（比图标本身高），用它底部往上提 26dp 刚好落在标题栏下沿
+        int top = anchorLoc[1] + anchor.getHeight() - dpToPx(ctx, 26);
+        top = Math.max(dpToPx(ctx, 8), top);
 
+        // 菜单挂在**独立的 WindowManager 窗口**上，而不是坞窗容器里 —— 卡片画面是
+        // SurfaceView 且 setZOrderOnTop(true)，它只有在「同一个窗口内」才压过别的 View；
+        // 菜单放进坞窗容器就会被画面盖住。开成独立窗口后，后添加的窗口在同 type 内层级更高，
+        // 于是「菜单能遮画面、画面遮不住菜单」。
         WindowManager wm = (WindowManager) ctx.getSystemService(Context.WINDOW_SERVICE);
         WindowManager.LayoutParams lp = new WindowManager.LayoutParams(
                 menuWidth, ViewGroup.LayoutParams.WRAP_CONTENT,
