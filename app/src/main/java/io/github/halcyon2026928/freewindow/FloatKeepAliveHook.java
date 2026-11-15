@@ -168,45 +168,50 @@ final class FloatKeepAliveHook {
     /**
      * 浮标任务上的保护：状态迁移、停止、暂停、暂停超时。
      *
-     * 可见性（makeInvisible / setVisibleRequested）本轮**只观测不改写**：
-     * 把浮标任务强行按成「可见」后，应用自己在跑的场景（例如红果换集起新 Activity）
-     * 会被窗口管理器当成可见任务重新提交，浮标直接展开成小窗——实测 3820 就是这么弹的。
-     * 所以这里放行系统自己的可见性收尾，进程档位改由 setState/addToStopping/pauseSkip
-     * 维持；播放不停由后面的音频焦点、亮屏伪装、息屏广播、Display/Keyguard 与 doze
-     * 白名单负责，那几条都不依赖「任务必须可见」。
+     * 可见性两条照上游 2.3.10 的做法：亮屏、未锁、不在旋转/解锁守卫里时，
+     * `makeInvisible()` 跳过、`setVisibleRequested(false)` 改成 `true` 后继续执行。
+     * 这样 ActivityRecord 维持「可见但未置顶」，进程留在 perceptible 档；
+     * 窗口本身仍由原厂隐藏，用户只看到浮标。
+     *
+     * 注意必须是「改参数继续执行」，不能直接跳过原方法：跳过会让原厂的可见性收尾走不完，
+     * 之后任务被重新提交时窗口以未裁剪的直角形态弹出来（旧版本实测就是直角小窗）。
+     *
+     * 锁屏/息屏、旋转过渡、解锁瞬间一律放行，避免窗口在这些时刻被重新显示出来。
      */
     private static boolean installRecordHooks() {
         boolean hooked = false;
 
-        // 1) makeInvisible(): 只观测，不拦截。系统该收尾就收尾，窗口才不会被抬起来。
+        // 1) makeInvisible(): 保活中的浮标任务跳过这次可见性收尾。
         hooked |= hookAllSafe(sRecordClass, "makeInvisible", new XC_MethodHook() {
             @Override
             protected void beforeHookedMethod(MethodHookParam param) {
                 try {
                     if (((Method) param.method).getReturnType() != Void.TYPE) return;
-                    if (!shouldKeep(param.thisObject)) return;
-                    logOnce("invisible_" + taskIdOf(param.thisObject),
-                            "task" + taskIdOf(param.thisObject) + " makeInvisible (放行，系统收尾)");
+                    if (!shouldKeepVisible(param.thisObject)) return;
+                    logSkip(param.thisObject, "invisible");
+                    param.setResult(null);
                 } catch (Throwable t) {
                     XposedBridge.log(TAG + " makeInvisible hook error: " + t.getMessage());
                 }
             }
         });
 
-        // 2) setVisibleRequested(boolean): 同样不拦截，只记录「谁把浮标任务抬成可见」。
+        // 2) setVisibleRequested(boolean): false 改成 true 继续执行（不是跳过原方法）。
         hooked |= hookAllSafe(sRecordClass, "setVisibleRequested", new XC_MethodHook() {
             @Override
             protected void beforeHookedMethod(MethodHookParam param) {
                 try {
                     if (param.args.length != 1) return;
-                    Boolean visible = (Boolean) param.args[0];
-                    if (visible == null) return;
-                    if (!visible.booleanValue()) {
-                        if (shouldKeep(param.thisObject)) {
-                            logOnce("release_" + taskIdOf(param.thisObject),
-                                    "task" + taskIdOf(param.thisObject) + " visibleRequested -> false (放行)");
-                        }
-                    } else if (shouldKeep(param.thisObject)) {
+                    Object arg = param.args[0];
+                    if (!(arg instanceof Boolean)) return;
+                    boolean visible = ((Boolean) arg).booleanValue();
+                    if (!visible && shouldKeepVisible(param.thisObject)) {
+                        logSkip(param.thisObject, "visible_requested");
+                        param.args[0] = Boolean.TRUE;
+                    } else if (!visible && shouldKeep(param.thisObject)) {
+                        logOnce("release_" + taskIdOf(param.thisObject),
+                                "task" + taskIdOf(param.thisObject) + " visibleRequested -> false (放行)");
+                    } else if (visible && shouldKeep(param.thisObject)) {
                         logOnce("raised_" + taskIdOf(param.thisObject),
                                 "task" + taskIdOf(param.thisObject) + " visibleRequested -> true (被抬起)");
                     }
