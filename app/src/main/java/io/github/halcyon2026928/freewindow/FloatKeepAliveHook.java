@@ -206,6 +206,7 @@ final class FloatKeepAliveHook {
                     if (visible) {
                         logOnce("raised_" + taskIdOf(param.thisObject),
                                 "task" + taskIdOf(param.thisObject) + " visibleRequested -> true (被抬起)");
+                        scheduleRehideRaised(param.thisObject);
                     } else {
                         logSkip(param.thisObject, "visible_requested_false");
                     }
@@ -448,6 +449,34 @@ final class FloatKeepAliveHook {
                 }
             }, UNLOCK_CHECK_DELAYS_MS[i]);
         }
+    }
+
+    /**
+     * 浮标里的任务刚被按成可见时，等一拍再看：如果它还在浮标列表里，
+     * 说明不是用户点浮标打开的（用户打开会让任务退出浮标），而是应用自己起新页面
+     * 把窗口抬起来了——这时把它压回不可见，浮标保持原样。
+     */
+    private static void scheduleRehideRaised(final Object record) {
+        Handler handler = sHandler;
+        if (handler == null || record == null) return;
+        handler.postDelayed(new Runnable() {
+            @Override
+            public void run() {
+                try {
+                    final int taskId = taskIdOf(record);
+                    if (taskId <= 0) return;
+                    // 已经退出浮标 → 用户主动打开，放行。
+                    if (!isFloating(taskId)) return;
+                    if (!shouldKeep(record)) return;
+                    if (!Boolean.TRUE.equals(readField(record, "mVisibleRequested"))) return;
+                    callNoArg(record, "setVisibleRequested", Boolean.FALSE);
+                    logOnce("rehide_raised_" + taskId,
+                            "task" + taskId + " 被抬起后又压回浮标（不是用户点开）");
+                } catch (Throwable t) {
+                    XposedBridge.log(TAG + " rehide raised error: " + t.getMessage());
+                }
+            }
+        }, 400);
     }
 
     /** 仍是浮标、却被按成可见的任务，重新压回不可见，让它回到浮标状态。 */
@@ -804,9 +833,9 @@ final class FloatKeepAliveHook {
                     if (!(visible instanceof Boolean) || ((Boolean) visible).booleanValue()) return;
                     if (!sRecordClass.isInstance(param.thisObject)) return;
                     if (!shouldKeep(param.thisObject)) return;
-                    param.args[0] = Boolean.TRUE;
-                    logOnce("client_" + taskIdOf(param.thisObject),
-                            "task" + taskIdOf(param.thisObject) + " client visible kept");
+                    // 只观测：把这里的 false 改成 true 会让窗口表面被重新提交，
+                    // 浮标里的应用一起新页面，小窗就跟着弹出来（3820 实测）。
+                    logSkip(param.thisObject, "client_visible_false");
                 } catch (Throwable t) {
                     XposedBridge.log(TAG + " setClientVisible hook error: " + t.getMessage());
                 }
