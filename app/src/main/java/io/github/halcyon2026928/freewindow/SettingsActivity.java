@@ -151,8 +151,11 @@ public class SettingsActivity extends Activity {
             qr.setImageResource(R.drawable.donate_qr);
             qr.setAdjustViewBounds(true);
             qr.setScaleType(ImageView.ScaleType.FIT_CENTER);
+            // 图按固定宽度居中（不再 MATCH_PARENT）：图缩到 230dp 左右，
+            // 内容整体变短，弹窗基本不用滚，也就不需要在右侧露滚动条。
             LinearLayout.LayoutParams qrParams = new LinearLayout.LayoutParams(
-                    LinearLayout.LayoutParams.MATCH_PARENT, LinearLayout.LayoutParams.WRAP_CONTENT);
+                    (int) (230 * density), LinearLayout.LayoutParams.WRAP_CONTENT);
+            qrParams.gravity = Gravity.CENTER_HORIZONTAL;
             qrParams.topMargin = pad;
             box.addView(qr, qrParams);
 
@@ -171,7 +174,8 @@ public class SettingsActivity extends Activity {
             reward.setAdjustViewBounds(true);
             reward.setScaleType(ImageView.ScaleType.FIT_CENTER);
             LinearLayout.LayoutParams rewardParams = new LinearLayout.LayoutParams(
-                    LinearLayout.LayoutParams.MATCH_PARENT, LinearLayout.LayoutParams.WRAP_CONTENT);
+                    (int) (190 * density), LinearLayout.LayoutParams.WRAP_CONTENT);
+            rewardParams.gravity = Gravity.CENTER_HORIZONTAL;
             rewardParams.topMargin = pad;
             box.addView(reward, rewardParams);
 
@@ -185,6 +189,11 @@ public class SettingsActivity extends Activity {
             box.addView(rewardHint, rewardHintParams);
 
             ScrollView sv = new ScrollView(this);
+            // 不要右侧那条滚动提示：内容仍然可滚（小屏兜底），但不显示 scrollbar，
+            // clipToPadding=false 让顶部文案不会被内容区裁掉一半。
+            sv.setVerticalScrollBarEnabled(false);
+            sv.setClipToPadding(false);
+            box.setPadding(pad, pad, pad, pad);
             sv.addView(box);
 
             new AlertDialog.Builder(this)
