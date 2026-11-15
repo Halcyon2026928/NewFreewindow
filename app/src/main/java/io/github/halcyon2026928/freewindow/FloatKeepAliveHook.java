@@ -95,6 +95,12 @@ final class FloatKeepAliveHook {
     private static Method sGetInstance;
     private static Method sIsInFloatingList;
 
+    /**
+     * 浮标内起新页面之后的一小段窗口期：这段时间里不把浮标 task 移出浮标。
+     * 见 installFloatEjectGuard —— 原厂正是在这一步把 mini 抬成小窗的。
+     */
+    private static volatile long sSuppressFloatEjectAt = 0L;
+
     /** 假暂停接管成功后为 true；只有它成立时才跳过暂停超时，避免服务端卡在 PAUSING。 */
     private static volatile boolean sPauseBypassActive = false;
 
@@ -145,6 +151,7 @@ final class FloatKeepAliveHook {
         installKeyguardGuard(classLoader);
         installFullScreenResetGuard(classLoader);
         installAdjustOptionsGuard(classLoader);
+        installFloatEjectGuard(classLoader);
         installAudioFocusGuard(classLoader);
         installAwakeGuard(classLoader);
         installScreenOffGuard(classLoader);
@@ -605,8 +612,11 @@ final class FloatKeepAliveHook {
                         }
                         if (sourcePkg instanceof String && sourcePkg.equals(startPkg)) {
                             param.setResult(Integer.valueOf(4));
-                            // 新页面照常在浮标 task 里起来，但任务不能因此变成可见的窗口。
-                            // 等它完成启动流程，再把浮标任务的可见性压回去。
+                            // 紧接着这一步，原厂会把 task 移到前台并摘掉浮标
+                            // （FloatHandleController.moveTaskToFront → "goto removeFloatHandle"），
+                            // 浮标就从 mini 变回 zoom，新页面以自由小窗的形态弹出来。
+                            // 记一个窗口期，让下面那个 hook 把这次「移出浮标」吃掉。
+                            sSuppressFloatEjectAt = SystemClock.uptimeMillis() + 2500L;
                             Handler handler = sHandler;
                             if (handler != null) {
                                 handler.postDelayed(new Runnable() {
@@ -667,6 +677,46 @@ final class FloatKeepAliveHook {
             }
         });
         if (!hookedAll) XposedBridge.log(TAG + " adjustOptionsForFlexibleTask not hooked");
+    }
+
+    /**
+     * 别让「浮标里的应用自己起新页面」把浮标摘掉。
+     *
+     * 3820 的系统日志（03:02:03.933）：
+     *   FloatHandleController: task has move to front, goto removeFloatHandle taskID = 3549
+     *   FloatHandleController: removeFloatHandleInner remove info = FloatHandleInfo{taskId = 3549 ...}
+     *   OplusZoomWindowObserverManager: OplusZoomWindowInfo { ... shown = true ... }
+     * 也就是：新页面一启动，原厂就把这个 task 当作「用户要打开它」处理——移到前台、摘掉浮标，
+     * task 从 mini 回到 zoom，于是新页面以官方自由小窗的形态弹出来。
+     * 这一步发生在 options 之后，所以之前改 reason / 改可见性都拦不住。
+     *
+     * 处理：只在「我们刚拦到浮标内同包起新页面」的那 2.5 秒里，把这次 moveTaskToFront 直接吃掉。
+     * task 留在浮标里，新页面照常 resume、照常播放。
+     * 用户真去点浮标打开应用时不走 isAllowedToAdjustOptions，窗口期不会打开，行为不受影响。
+     */
+    private static boolean installFloatEjectGuard(ClassLoader classLoader) {
+        Class<?> controller = findClassSafe(classLoader, CONTROLLER_CLASS);
+        if (controller == null) return false;
+        boolean hooked = hookAllSafe(controller, "moveTaskToFront", new XC_MethodHook() {
+            @Override
+            protected void beforeHookedMethod(MethodHookParam param) {
+                try {
+                    if (param.args.length != 2) return;
+                    if (SystemClock.uptimeMillis() >= sSuppressFloatEjectAt) return;
+                    Object task = param.args[1];
+                    if (task == null) return;
+                    int taskId = taskIdOfObject(task);
+                    if (taskId <= 0 || !isFloating(taskId)) return;
+                    param.setResult(null);
+                    logOnce("eject_" + taskId,
+                            "task" + taskId + " 起新页面时不移出浮标（保留浮标，不弹窗）");
+                } catch (Throwable t) {
+                    XposedBridge.log(TAG + " moveTaskToFront hook error: " + t.getMessage());
+                }
+            }
+        });
+        if (!hooked) XposedBridge.log(TAG + " FloatHandleController.moveTaskToFront missing");
+        return hooked;
     }
 
     private static boolean isLockedOrOff(Object controller) {
