@@ -101,6 +101,12 @@ final class FloatKeepAliveHook {
      */
     private static volatile long sSuppressFloatEjectAt = 0L;
 
+    /**
+     * 用户主动从浮标打开应用的窗口期：这段时间内放行「抬成可见」，
+     * 否则会把正常点开也拦掉（上游 2.3.6 修过的「解锁后从浮标打不开」）。
+     */
+    private static volatile long sUserFloatOpenAt = 0L;
+
     /** 假暂停接管成功后为 true；只有它成立时才跳过暂停超时，避免服务端卡在 PAUSING。 */
     private static volatile boolean sPauseBypassActive = false;
 
@@ -200,7 +206,9 @@ final class FloatKeepAliveHook {
             }
         });
 
-        // 2) setVisibleRequested(boolean): 同样只观测，记录可见性被谁改成什么。
+        // 2) setVisibleRequested(boolean[, boolean])：浮标任务不接受「抬成可见」。
+        //    先放行再压回会让窗口显示半拍又消失、输入焦点丢掉（3820 实测 ANR），
+        //    所以直接在 before 里拒掉；用户点浮标打开时会先经过 moveTaskToFront 打开白名单。
         hooked |= hookAllSafe(sRecordClass, "setVisibleRequested", new XC_MethodHook() {
             @Override
             protected void beforeHookedMethod(MethodHookParam param) {
@@ -211,14 +219,39 @@ final class FloatKeepAliveHook {
                     boolean visible = ((Boolean) arg).booleanValue();
                     if (!shouldKeep(param.thisObject)) return;
                     if (visible) {
-                        logOnce("raised_" + taskIdOf(param.thisObject),
-                                "task" + taskIdOf(param.thisObject) + " visibleRequested -> true (被抬起)");
-                        scheduleRehideRaised(param.thisObject);
+                        if (SystemClock.uptimeMillis() < sUserFloatOpenAt) {
+                            logOnce("useropen_" + taskIdOf(param.thisObject),
+                                    "task" + taskIdOf(param.thisObject) + " 用户从浮标打开，放行可见");
+                            return;
+                        }
+                        param.args[0] = Boolean.FALSE;
+                        logOnce("deny_raised_" + taskIdOf(param.thisObject),
+                                "task" + taskIdOf(param.thisObject) + " 拒绝抬成可见（浮标保持）");
                     } else {
                         logSkip(param.thisObject, "visible_requested_false");
                     }
                 } catch (Throwable t) {
                     XposedBridge.log(TAG + " setVisibleRequested hook error: " + t.getMessage());
+                }
+            }
+        });
+
+        // 2b) setVisibility(boolean)：系统的应用切换流程会直接在这里写可见性，
+        //     不经过 setVisibleRequested，浮标任务同样要拒掉。
+        hooked |= hookAllSafe(sRecordClass, "setVisibility", new XC_MethodHook() {
+            @Override
+            protected void beforeHookedMethod(MethodHookParam param) {
+                try {
+                    if (param.args.length != 1) return;
+                    Object arg = param.args[0];
+                    if (!(arg instanceof Boolean) || !((Boolean) arg).booleanValue()) return;
+                    if (!shouldKeep(param.thisObject)) return;
+                    if (SystemClock.uptimeMillis() < sUserFloatOpenAt) return;
+                    param.args[0] = Boolean.FALSE;
+                    logOnce("deny_visibility_" + taskIdOf(param.thisObject),
+                            "task" + taskIdOf(param.thisObject) + " 拒绝提交可见性（浮标保持）");
+                } catch (Throwable t) {
+                    XposedBridge.log(TAG + " setVisibility hook error: " + t.getMessage());
                 }
             }
         });
@@ -702,14 +735,19 @@ final class FloatKeepAliveHook {
             protected void beforeHookedMethod(MethodHookParam param) {
                 try {
                     if (param.args.length != 2) return;
-                    if (SystemClock.uptimeMillis() >= sSuppressFloatEjectAt) return;
                     Object task = param.args[1];
                     if (task == null) return;
                     int taskId = taskIdOfObject(task);
                     if (taskId <= 0 || !isFloating(taskId)) return;
-                    param.setResult(null);
-                    logOnce("eject_" + taskId,
-                            "task" + taskId + " 起新页面时不移出浮标（保留浮标，不弹窗）");
+                    if (SystemClock.uptimeMillis() < sSuppressFloatEjectAt) {
+                        // 应用自己起新页面：这次别移出浮标
+                        param.setResult(null);
+                        logOnce("eject_" + taskId,
+                                "task" + taskId + " 起新页面时不移出浮标（保留浮标，不弹窗）");
+                        return;
+                    }
+                    // 其余情况（用户点浮标打开）记一个白名单窗口，放行后面的可见性
+                    sUserFloatOpenAt = SystemClock.uptimeMillis() + 2000L;
                 } catch (Throwable t) {
                     XposedBridge.log(TAG + " moveTaskToFront hook error: " + t.getMessage());
                 }
