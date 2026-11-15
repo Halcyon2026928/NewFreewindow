@@ -144,6 +144,7 @@ final class FloatKeepAliveHook {
         installRotationGuard(classLoader);
         installKeyguardGuard(classLoader);
         installFullScreenResetGuard(classLoader);
+        installAdjustOptionsGuard(classLoader);
         installAudioFocusGuard(classLoader);
         installAwakeGuard(classLoader);
         installScreenOffGuard(classLoader);
@@ -506,6 +507,49 @@ final class FloatKeepAliveHook {
         if (isFloating(taskId)) return true;
         WeakReference<Object> ref = sTracked.get(taskId);
         return ref != null && ref.get() != null;
+    }
+
+    /**
+     * 应用在浮标里自己起新页面（例如短剧换集）时，别让原厂把新 Activity 排成浮动小窗。
+     *
+     * 反编译 FlexibleTaskController 里那条判定：
+     *   `isAllowedToAdjustOptions` 只有在「来源与目标同一个 task，且目标可见或来源 visibleRequested
+     *   为真」时才 return 4（= 不调整 options，沿用原样）；否则 return 0，进入
+     *   `adjustOptionsForFlexibleTask` 的浮动小窗布局分支，新 Activity 就被摆成小窗、浮标随之展开。
+     *
+     * 保活为了让进程不掉档，浮标任务的 visibleRequested 是 false，所以每次都掉进「弹小窗」那条。
+     * 这里按「保活中的浮标 task + 同 task 内启动」把结果按成 4，等价于原厂认为它「还在正常显示」，
+     * 于是新 Activity 在原 task 里继续跑，窗口不弹出来；播放不受影响。
+     */
+    private static void installAdjustOptionsGuard(ClassLoader classLoader) {
+        Class<?> flexibleClass = findClassSafe(classLoader, FLEXIBLE_CONTROLLER_CLASS);
+        if (flexibleClass == null) return;
+        boolean hooked = hookAllSafe(flexibleClass, "isAllowedToAdjustOptions", new XC_MethodHook() {
+            @Override
+            protected void afterHookedMethod(MethodHookParam param) {
+                try {
+                    if (!keepAliveEnabled()) return;
+                    if (param.args.length < 4) return;
+                    if (((Method) param.method).getReturnType() != Integer.TYPE) return;
+                    Object targetTask = param.args[3];
+                    if (targetTask == null) return;
+                    int taskId = taskIdOfObject(targetTask);
+                    if (taskId <= 0 || !isFloating(taskId)) return;
+                    Object sourceRecord = param.args[1];
+                    if (sourceRecord == null) return;
+                    Object sourceTask = readField(sourceRecord, "task");
+                    if (sourceTask == null) sourceTask = readField(sourceRecord, "mTask");
+                    // 只在「同一个 task 内起新页面」时接管；跨 task 的正常跳转照原样走。
+                    if (sourceTask == null || sourceTask != targetTask) return;
+                    logOnce("adjust_" + taskId,
+                            "task" + taskId + " 同 task 内起新页面，保持浮标（不排成小窗）");
+                    param.setResult(Integer.valueOf(4));
+                } catch (Throwable t) {
+                    XposedBridge.log(TAG + " isAllowedToAdjustOptions hook error: " + t.getMessage());
+                }
+            }
+        });
+        if (!hooked) XposedBridge.log(TAG + " isAllowedToAdjustOptions not hooked");
     }
 
     private static boolean isLockedOrOff(Object controller) {
