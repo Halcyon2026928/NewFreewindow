@@ -74,6 +74,8 @@ public class MainHook implements IXposedHookLoadPackage {
     private static Handler sHandleHandler;
     /** 坞窗容器（全局唯一）。 */
     private static FrameLayout sDockContainer;
+    /** 坞窗外面那层全屏透明遮罩：专门吃掉「点坞窗外」那一下，避免穿透到桌面图标。 */
+    private static View sDockMask;
     private static View sDockPanel;
     private static int sDockSide = 1;
     private static boolean sDockClosing = false;
@@ -1224,6 +1226,50 @@ public class MainHook implements IXposedHookLoadPackage {
             windowParams.gravity = Gravity.TOP | Gravity.START;
             windowParams.setTitle("FreeWindowDock");
 
+            // 坞窗外的点击必须由我们自己吃掉，否则点桌面图标会顺手把那个应用一起打开。
+            // 只靠 FLAG_WATCH_OUTSIDE_TOUCH 不够用：它只是「告诉」我们外面被点了一下，
+            // 事件本身照样派发给下层窗口。所以这里单独加一个铺满全屏、完全透明的遮罩窗口
+            // （type 2003，层级低于坞窗的 2520），坞窗外的触摸全部落到它身上：
+            // 收到 DOWN 就收起坞窗并 return true 把整个触摸序列吃掉，
+            // 遮罩本身留到坞窗滑出动画结束（finishRemoveDock）才移除 —— 也就是
+            // 「坞窗完全收起之后，其它地方才恢复可点」。
+            try {
+                View mask = new View(ctx);
+                // 与坞窗同一个 type（2520），靠「先添加」压在下层：WMS 对同 type/同 subLayer
+                // 的窗口按添加顺序叠放，所以后加的坞窗一定盖在遮罩之上。用 2520 而不是
+                // 2003 也顺手避开了系统对 TYPE_SYSTEM_ALERT 的频率限流。
+                WindowManager.LayoutParams maskParams = new WindowManager.LayoutParams(2520);
+                maskParams.flags = WindowManager.LayoutParams.FLAG_NOT_FOCUSABLE
+                        | WindowManager.LayoutParams.FLAG_LAYOUT_IN_SCREEN
+                        | WindowManager.LayoutParams.FLAG_LAYOUT_NO_LIMITS;
+                maskParams.format = PixelFormat.TRANSLUCENT;
+                maskParams.width = WindowManager.LayoutParams.MATCH_PARENT;
+                maskParams.height = WindowManager.LayoutParams.MATCH_PARENT;
+                maskParams.gravity = Gravity.TOP | Gravity.START;
+                maskParams.setTitle("FreeWindowDockMask");
+                try {
+                    Field pf2 = WindowManager.LayoutParams.class.getDeclaredField("privateFlags");
+                    pf2.setAccessible(true);
+                    pf2.setInt(maskParams, 16); // PRIVATE_FLAG_TRUSTED_OVERLAY
+                } catch (Throwable ignored) {
+                }
+                mask.setOnTouchListener(new View.OnTouchListener() {
+                    @Override
+                    public boolean onTouch(View v, MotionEvent event) {
+                        if (event.getActionMasked() == MotionEvent.ACTION_DOWN) {
+                            XposedBridge.log(TAG + " tap outside dock (mask), closing");
+                            removeAppMenu();
+                            removeFloatDock();
+                        }
+                        return true; // DOWN/UP/MOVE 全部吃掉，绝不再往下派发
+                    }
+                });
+                wm.addView(mask, maskParams);
+                sDockMask = mask;
+            } catch (Throwable t) {
+                XposedBridge.log(TAG + " dock mask add failed: " + t.getMessage());
+            }
+
             wm.addView(container, windowParams);
             sDockWinLeft = dockLeft;
             sDockWinTop = dockTopScreen;
@@ -2003,6 +2049,8 @@ public class MainHook implements IXposedHookLoadPackage {
                 XposedBridge.log(TAG + " remove dock on rotate failed: " + t.getMessage());
             }
         }
+        // 重建时会重新加遮罩，这里先把旧的撤掉，避免两片全屏遮罩叠在一起。
+        removeDockMask();
 
         // 重建必须回到创建坞窗视图的那个线程（android.ui）：跨线程 addView/removeView 会
         // 抛 CalledFromWrongThreadException 并让 system_server 重启。拿不到就不重建。
@@ -2140,6 +2188,8 @@ public class MainHook implements IXposedHookLoadPackage {
             }
             sDockContainer = null;
         }
+        // 坞窗彻底收起后才撤遮罩：这之前外面那一片仍然不可点，不会误触桌面图标。
+        removeDockMask();
         sDockPanel = null;
         sDockScrollView = null;
         sDockCardList = null;
@@ -2148,6 +2198,20 @@ public class MainHook implements IXposedHookLoadPackage {
         sOrientationWatch = false;
         if (sClassLoader != null) {
             hideAllFloatHandles(sClassLoader, 1f);
+        }
+    }
+
+    /** 撤掉坞窗外面的全屏遮罩。只能在创建它那个线程（android.ui）上调用。 */
+    private static void removeDockMask() {
+        View mask = sDockMask;
+        sDockMask = null;
+        if (mask == null) return;
+        try {
+            Context ctx = mask.getContext();
+            WindowManager wm = (WindowManager) ctx.getSystemService(Context.WINDOW_SERVICE);
+            wm.removeViewImmediate(mask);
+        } catch (Throwable t) {
+            XposedBridge.log(TAG + " remove dock mask failed: " + t.getMessage());
         }
     }
 
