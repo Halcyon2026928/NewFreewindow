@@ -2,6 +2,7 @@ package io.github.halcyon2026928.freewindow;
 
 import android.app.Activity;
 import android.app.AlertDialog;
+import android.app.Dialog;
 import android.content.Context;
 import android.graphics.Color;
 import android.os.Build;
@@ -129,8 +130,8 @@ public class SettingsActivity extends Activity {
     }
 
     /**
-     * 捐赠弹窗：一张图同时含微信 / 支付宝收款码，配一段「有捐赠就有动力」的说明。
-     * 内容整体交给 ScrollView，图片在小屏上按宽度自适应，保证二维码扫得出来。
+     * 捐赠弹窗：一张图同时含微信 / 支付宝收款码和支付宝领红包入口，
+     * 图可以点开放大到全屏，弹窗和图都收圆角。
      */
     private void showDonateDialog() {
         try {
@@ -139,7 +140,7 @@ public class SettingsActivity extends Activity {
 
             LinearLayout box = new LinearLayout(this);
             box.setOrientation(LinearLayout.VERTICAL);
-            box.setPadding(pad, pad, pad, 0);
+            box.setPadding(pad, pad, pad, pad);
 
             TextView msg = new TextView(this);
             msg.setText(R.string.donate_dialog_msg);
@@ -147,17 +148,22 @@ public class SettingsActivity extends Activity {
             msg.setLineSpacing(0f, 1.3f);
             box.addView(msg);
 
+            // 三栏合一：微信收款码 / 支付宝收款码 / 支付宝扫码领红包
             ImageView qr = new ImageView(this);
             qr.setImageResource(R.drawable.donate_qr);
             qr.setAdjustViewBounds(true);
             qr.setScaleType(ImageView.ScaleType.FIT_CENTER);
-            // 图按固定宽度居中（不再 MATCH_PARENT）：图缩到 230dp 左右，
-            // 内容整体变短，弹窗基本不用滚，也就不需要在右侧露滚动条。
             LinearLayout.LayoutParams qrParams = new LinearLayout.LayoutParams(
-                    (int) (230 * density), LinearLayout.LayoutParams.WRAP_CONTENT);
-            qrParams.gravity = Gravity.CENTER_HORIZONTAL;
+                    LinearLayout.LayoutParams.MATCH_PARENT, LinearLayout.LayoutParams.WRAP_CONTENT);
             qrParams.topMargin = pad;
             box.addView(qr, qrParams);
+            applyRoundedOutline(qr, 16f);
+            qr.setOnClickListener(new View.OnClickListener() {
+                @Override
+                public void onClick(View v) {
+                    showDonateFullImage();
+                }
+            });
 
             TextView hint = new TextView(this);
             hint.setText(R.string.donate_qr_desc);
@@ -168,42 +174,90 @@ public class SettingsActivity extends Activity {
             hintParams.topMargin = pad / 2;
             box.addView(hint, hintParams);
 
-            // 第二张：支付宝扫码领红包（互惠入口，不动代码也能支持一下）
-            ImageView reward = new ImageView(this);
-            reward.setImageResource(R.drawable.donate_reward);
-            reward.setAdjustViewBounds(true);
-            reward.setScaleType(ImageView.ScaleType.FIT_CENTER);
-            LinearLayout.LayoutParams rewardParams = new LinearLayout.LayoutParams(
-                    (int) (190 * density), LinearLayout.LayoutParams.WRAP_CONTENT);
-            rewardParams.gravity = Gravity.CENTER_HORIZONTAL;
-            rewardParams.topMargin = pad;
-            box.addView(reward, rewardParams);
-
-            TextView rewardHint = new TextView(this);
-            rewardHint.setText(R.string.donate_reward_desc);
-            rewardHint.setTextSize(12);
-            rewardHint.setGravity(Gravity.CENTER);
-            LinearLayout.LayoutParams rewardHintParams = new LinearLayout.LayoutParams(
-                    LinearLayout.LayoutParams.MATCH_PARENT, LinearLayout.LayoutParams.WRAP_CONTENT);
-            rewardHintParams.topMargin = pad / 2;
-            box.addView(rewardHint, rewardHintParams);
-
             ScrollView sv = new ScrollView(this);
             // 不要右侧那条滚动提示：内容仍然可滚（小屏兜底），但不显示 scrollbar，
             // clipToPadding=false 让顶部文案不会被内容区裁掉一半。
             sv.setVerticalScrollBarEnabled(false);
             sv.setClipToPadding(false);
-            box.setPadding(pad, pad, pad, pad);
             sv.addView(box);
 
-            new AlertDialog.Builder(this)
+            AlertDialog dlg = new AlertDialog.Builder(this)
                     .setTitle(R.string.donate_dialog_title)
                     .setView(sv)
                     .setPositiveButton(R.string.donate_dialog_close, null)
-                    .show();
+                    .create();
+            dlg.show();
+
+            // 弹窗本身也收圆角。背景色取主题的 window background，
+            // 深浅色主题下都是同一个颜色，不会出现白底配白字的怪样子。
+            try {
+                Window w = dlg.getWindow();
+                if (w != null) {
+                    android.graphics.drawable.GradientDrawable bg =
+                            new android.graphics.drawable.GradientDrawable();
+                    bg.setColor(resolveWindowBackgroundColor());
+                    bg.setCornerRadius(20 * density);
+                    w.setBackgroundDrawable(bg);
+                }
+            } catch (Throwable ignored) {
+                // 圆角失败只是视觉退化，弹窗照样能用
+            }
         } catch (Throwable t) {
             android.util.Log.w("freewindow", "showDonateDialog failed: " + t);
         }
+    }
+
+    /** 点图放大：全屏黑底显示整张码图，点任意位置关闭。 */
+    private void showDonateFullImage() {
+        try {
+            final Dialog dlg = new Dialog(this,
+                    android.R.style.Theme_Black_NoTitleBar_Fullscreen);
+            int pad = (int) (14 * getResources().getDisplayMetrics().density);
+            ImageView iv = new ImageView(this);
+            iv.setImageResource(R.drawable.donate_qr);
+            iv.setScaleType(ImageView.ScaleType.FIT_CENTER);
+            iv.setPadding(pad, pad, pad, pad);
+            iv.setOnClickListener(new View.OnClickListener() {
+                @Override
+                public void onClick(View v) {
+                    dlg.dismiss();
+                }
+            });
+            dlg.setContentView(iv);
+            dlg.show();
+        } catch (Throwable t) {
+            android.util.Log.w("freewindow", "showDonateFullImage failed: " + t);
+        }
+    }
+
+    /**
+     * 给 View 收圆角：API 21 的 outline 裁剪，不依赖 androidx。
+     * 只对矩形图片有效，纯视觉处理。
+     */
+    private void applyRoundedOutline(View v, float radiusDp) {
+        try {
+            android.graphics.drawable.GradientDrawable bg =
+                    new android.graphics.drawable.GradientDrawable();
+            bg.setColor(Color.WHITE);
+            bg.setCornerRadius(radiusDp * getResources().getDisplayMetrics().density);
+            v.setBackground(bg);
+            v.setClipToOutline(true);
+        } catch (Throwable ignored) {
+            // 低版本不支持 outline 裁剪就保持直角
+        }
+    }
+
+    /** 主题里的窗口背景色，用于给弹窗自己做圆角底。 */
+    private int resolveWindowBackgroundColor() {
+        try {
+            android.util.TypedValue tv = new android.util.TypedValue();
+            if (getTheme().resolveAttribute(android.R.attr.colorBackground, tv, true)) {
+                return tv.data;
+            }
+        } catch (Throwable ignored) {
+            // 取不到就退回白色
+        }
+        return Color.WHITE;
     }
 
     /**
