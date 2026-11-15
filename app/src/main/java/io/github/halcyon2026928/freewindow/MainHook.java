@@ -1847,7 +1847,15 @@ public class MainHook implements IXposedHookLoadPackage {
         } catch (Throwable t) {
             XposedBridge.log(TAG + " mute: uid lookup failed for " + pkgName + ": " + t.getMessage());
         }
-        if (uid <= 0) return;
+        // 已静音时优先用当时记下的 uid：应用被重装或查询失败也能正常取消，不会留下永久静音
+        if (muted) {
+            Integer stored = sMutedApps.get(key);
+            if (stored != null && stored > 0) uid = stored;
+        }
+        if (uid <= 0) {
+            XposedBridge.log(TAG + " mute: give up, unknown uid for " + pkgName);
+            return;
+        }
 
         if (!setVolumeForUid(muted ? 1f : 0f, uid, pkgName, cl)) {
             XposedBridge.log(TAG + " mute: setVolumeForUid unavailable, skip pkg=" + pkgName);
