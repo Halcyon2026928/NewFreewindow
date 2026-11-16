@@ -58,7 +58,6 @@ final class FloatKeepAliveHook {
     private static final String TASK_FRAGMENT_CLASS = "com.android.server.wm.TaskFragment";
     private static final String FLEXIBLE_CONTROLLER_CLASS = "com.android.server.wm.FlexibleTaskController";
     private static final String TASK_CLASS = "com.android.server.wm.Task";
-    private static final String TOKEN_CLASS = "com.android.server.wm.WindowToken";
     private static final String WMS_CLASS = "com.android.server.wm.WindowManagerService";
     private static final String POWER_BINDER_CLASS =
             "com.android.server.power.PowerManagerService$BinderService";
@@ -70,7 +69,6 @@ final class FloatKeepAliveHook {
 
     /** Display.STATE_ON / STATE_OFF。 */
     private static final int DISPLAY_STATE_ON = 2;
-    private static final int DISPLAY_STATE_OFF = 1;
 
     private static final Set<String> STOP_STATES = new HashSet<>();
 
@@ -161,7 +159,6 @@ final class FloatKeepAliveHook {
         installAudioFocusGuard(classLoader);
         installAwakeGuard(classLoader);
         installScreenOffGuard(classLoader);
-        installClientVisibleGuard(classLoader);
         installDisplayStateGuard(classLoader);
         installKeyguardLockGuard(classLoader);
         sExemptExec.execute(new Runnable() {
@@ -491,34 +488,6 @@ final class FloatKeepAliveHook {
         }
     }
 
-    /**
-     * 浮标里的任务刚被按成可见时，等一拍再看：如果它还在浮标列表里，
-     * 说明不是用户点浮标打开的（用户打开会让任务退出浮标），而是应用自己起新页面
-     * 把窗口抬起来了——这时把它压回不可见，浮标保持原样。
-     */
-    private static void scheduleRehideRaised(final Object record) {
-        Handler handler = sHandler;
-        if (handler == null || record == null) return;
-        handler.postDelayed(new Runnable() {
-            @Override
-            public void run() {
-                try {
-                    final int taskId = taskIdOf(record);
-                    if (taskId <= 0) return;
-                    // 已经退出浮标 → 用户主动打开，放行。
-                    if (!isFloating(taskId)) return;
-                    if (!shouldKeep(record)) return;
-                    if (!Boolean.TRUE.equals(readField(record, "mVisibleRequested"))) return;
-                    callNoArg(record, "setVisibleRequested", Boolean.FALSE);
-                    logOnce("rehide_raised_" + taskId,
-                            "task" + taskId + " 被抬起后又压回浮标（不是用户点开）");
-                } catch (Throwable t) {
-                    XposedBridge.log(TAG + " rehide raised error: " + t.getMessage());
-                }
-            }
-        }, 400);
-    }
-
     /** 仍是浮标、却被按成可见的任务，重新压回不可见，让它回到浮标状态。 */
     private static void rehideTracked(String reason) {
         for (java.util.Map.Entry<Integer, WeakReference<Object>> entry : sTracked.entrySet()) {
@@ -589,6 +558,16 @@ final class FloatKeepAliveHook {
      * 这里按「保活中的浮标 task + 同 task 内启动」把结果按成 4，等价于原厂认为它「还在正常显示」，
      * 于是新 Activity 在原 task 里继续跑，窗口不弹出来；播放不受影响。
      */
+    /**
+     * 认标记：哪一次启动是「浮标里的应用自己起了新页面」。
+     *
+     * 这一步**只做识别，不改原厂的判定结果**。之前在这里把 reason 按成 4 是无效的——
+     * 实测 reason 9 和 4 都会走到同一个结果：原厂随后把 task 移前台、摘浮标、抬成 zoom，
+     * 新页面就是以自由小窗的形态出来（3820 03:02 日志）。窗口形态不是 options 决定的。
+     *
+     * 唯一有用的产出是一个时间窗：接下来的 moveTaskToFront 属于「自己起页面」，
+     * 不该把浮标摘掉（见 installFloatEjectGuard）。
+     */
     private static void installAdjustOptionsGuard(ClassLoader classLoader) {
         Class<?> flexibleClass = findClassSafe(classLoader, FLEXIBLE_CONTROLLER_CLASS);
         if (flexibleClass == null) return;
@@ -599,117 +578,27 @@ final class FloatKeepAliveHook {
                     if (!keepAliveEnabled()) return;
                     if (param.args.length < 4) return;
                     if (((Method) param.method).getReturnType() != Integer.TYPE) return;
-                    Object targetTask = param.args[3];
-                    Object sourceRecord = param.args[1];
-                    int targetId = taskIdOfObject(targetTask);
-                    int sourceId = -1;
-                    if (sourceRecord != null) {
-                        Object sourceTask = readField(sourceRecord, "task");
-                        if (sourceTask == null) sourceTask = readField(sourceRecord, "mTask");
-                        sourceId = taskIdOfObject(sourceTask);
-                    }
-                    boolean floatInvolved = (targetId > 0 && isFloating(targetId))
-                            || (sourceId > 0 && isFloating(sourceId));
-                    if (!floatInvolved) return;
-                    Object result = param.getResult();
-                    boolean targetVisible = Boolean.TRUE.equals(callNoArg(targetTask, "isVisible"));
-                    boolean sourceVisibleReq = Boolean.TRUE.equals(readField(sourceRecord, "mVisibleRequested"));
-                    String startName = "null";
                     Object startActivity = param.args[2];
-                    if (startActivity != null) {
-                        Object shortName = readField(startActivity, "shortComponentName");
-                        if (shortName instanceof String) startName = (String) shortName;
-                    }
-                    XposedBridge.log(TAG + " adjustOptions reason=" + result
-                            + " srcTask=" + sourceId + " tgtTask=" + targetId
-                            + " tgtVisible=" + targetVisible
-                            + " srcVisibleReq=" + sourceVisibleReq
-                            + " start=" + startName);
-
-                    /*
-                     * 拦：来源就在保活浮标里，新页面又是同一个应用自己的（首页换集、进全集、
-                     * 点「观看完整短剧」都属于这种），一律按原厂「同 task 内正常启动」的语义
-                     * 返回 4。reason 4 不进任何窗口调整分支（走 skip adjust options），
-                     * 新页面沿用原 task 的窗口继续跑，浮标不会被展开成小窗或全屏。
-                     *
-                     * 不能在这一层直接放回原 options——那等于不给新页面任何窗口信息，会全屏。
-                     * 也不能只认「同 task」：实测首页换集时 target 是新建 task，同 task 条件不成立。
-                     */
-                    if (sourceId > 0 && isFloating(sourceId) && startActivity != null) {
-                        Object sourcePkg = readField(sourceRecord, "packageName");
-                        Object startPkg = readField(startActivity, "packageName");
-                        if (sourcePkg instanceof String && sourcePkg.equals(startPkg)
-                                && !(result instanceof Integer && ((Integer) result).intValue() == 4)) {
-                            XposedBridge.log(TAG + " task" + sourceId + " 浮标内起新页面，reason "
-                                    + result + " -> 4（沿用原 task 窗口）");
-                        }
-                        if (sourcePkg instanceof String && sourcePkg.equals(startPkg)) {
-                            param.setResult(Integer.valueOf(4));
-                            // 紧接着这一步，原厂会把 task 移到前台并摘掉浮标
-                            // （FloatHandleController.moveTaskToFront → "goto removeFloatHandle"），
-                            // 浮标就从 mini 变回 zoom，新页面以自由小窗的形态弹出来。
-                            // 记一个窗口期，让下面那个 hook 把这次「移出浮标」吃掉。
-                            sSuppressFloatEjectAt = SystemClock.uptimeMillis() + 2500L;
-                            Handler handler = sHandler;
-                            if (handler != null) {
-                                handler.postDelayed(new Runnable() {
-                                    @Override
-                                    public void run() {
-                                        try {
-                                            rehideTracked("after_launch");
-                                        } catch (Throwable t) {
-                                            XposedBridge.log(TAG + " after launch rehide error: " + t.getMessage());
-                                        }
-                                    }
-                                }, 300);
-                            }
-                        }
-                    }
+                    Object sourceRecord = param.args[1];
+                    if (startActivity == null || sourceRecord == null) return;
+                    Object sourceTask = readField(sourceRecord, "task");
+                    if (sourceTask == null) sourceTask = readField(sourceRecord, "mTask");
+                    int sourceId = taskIdOfObject(sourceTask);
+                    if (sourceId <= 0 || !isFloating(sourceId)) return;
+                    Object sourcePkg = readField(sourceRecord, "packageName");
+                    Object startPkg = readField(startActivity, "packageName");
+                    if (!(sourcePkg instanceof String) || !(startPkg instanceof String)) return;
+                    if (!sourcePkg.equals(startPkg)) return;
+                    sSuppressFloatEjectAt = SystemClock.uptimeMillis() + 2500L;
+                    logOnce("floatjump_" + sourceId,
+                            "task" + sourceId + " 浮标内起新页面（" + startPkg + "），reason="
+                                    + param.getResult() + " 不摘浮标");
                 } catch (Throwable t) {
                     XposedBridge.log(TAG + " isAllowedToAdjustOptions hook error: " + t.getMessage());
                 }
             }
         });
         if (!hooked) XposedBridge.log(TAG + " isAllowedToAdjustOptions not hooked");
-
-        /*
-         * 更彻底的兜底：apply「应用自己在浮标里起页面 → 整个跳过浮动 options 调整」。
-         *
-         * 首页换集 / 点「观看完整短剧」这类跳转，红果会把新页面放到另一个 task 上，
-         * 上面那条「同 task」判定就不成立；原厂于是照样把新 task 摆成浮动小窗、浮标随之展开。
-         * adjustOptionsForFlexibleTask 是所有启动都要过的口子，且入参就是调用方的原始 options：
-         * 在 before 阶段直接按原 options 返回，等价于「本次不调整」，新页面留在原 task 里继续跑。
-         *
-         * 只认「来源是保活浮标 task 且新页面还是同一个应用」的内部跳转；
-         * 跨应用（分享、跳浏览器等）保持原厂处理。
-         */
-        boolean hookedAll = hookAllSafe(flexibleClass, "adjustOptionsForFlexibleTask", new XC_MethodHook() {
-            @Override
-            protected void beforeHookedMethod(MethodHookParam param) {
-                try {
-                    if (!keepAliveEnabled()) return;
-                    if (param.args.length < 5) return;
-                    Object rawOptions = param.args[2];
-                    Object startActivity = param.args[3];
-                    Object sourceRecord = param.args[4];
-                    if (startActivity == null || sourceRecord == null) return;
-                    Object sourceTask = readField(sourceRecord, "task");
-                    if (sourceTask == null) sourceTask = readField(sourceRecord, "mTask");
-                    int taskId = taskIdOfObject(sourceTask);
-                    if (taskId <= 0 || !isFloating(taskId)) return;
-                    Object sourcePkg = readField(sourceRecord, "packageName");
-                    Object startPkg = readField(startActivity, "packageName");
-                    if (!(sourcePkg instanceof String) || !(startPkg instanceof String)) return;
-                    if (!sourcePkg.equals(startPkg)) return;
-                    logOnce("floatjump_" + taskId,
-                            "task" + taskId + " 浮标内起新页面（" + startPkg + "），观察原厂怎样排窗口");
-                    // 这里**不能**把 options 原样返回：那等于不给新页面任何窗口信息，会全屏展开。
-                } catch (Throwable t) {
-                    XposedBridge.log(TAG + " adjustOptionsForFlexibleTask hook error: " + t.getMessage());
-                }
-            }
-        });
-        if (!hookedAll) XposedBridge.log(TAG + " adjustOptionsForFlexibleTask not hooked");
     }
 
     /**
@@ -915,36 +804,6 @@ final class FloatKeepAliveHook {
             }
         }
         return packages;
-    }
-
-    /**
-     * 锁屏期间仍然向应用报告「窗口可见」。
-     *
-     * 窗口管理器侧该任务照旧是不可见的（不会在锁屏上显示），这里只改下发给应用的那一个标志：
-     * 应用侧 onWindowVisibilityChanged(true) / View.isShown() 保持可见，播放器才不会因为
-     * 「窗口不可见」在换集时停掉。
-     */
-    private static void installClientVisibleGuard(ClassLoader classLoader) {
-        Class<?> tokenClass = findClassSafe(classLoader, TOKEN_CLASS);
-        if (tokenClass == null) return;
-        boolean hooked = hookAllSafe(tokenClass, "setClientVisible", new XC_MethodHook() {
-            @Override
-            protected void beforeHookedMethod(MethodHookParam param) {
-                try {
-                    if (param.args.length != 1) return;
-                    Object visible = param.args[0];
-                    if (!(visible instanceof Boolean) || ((Boolean) visible).booleanValue()) return;
-                    if (!sRecordClass.isInstance(param.thisObject)) return;
-                    if (!shouldKeep(param.thisObject)) return;
-                    // 只观测：把这里的 false 改成 true 会让窗口表面被重新提交，
-                    // 浮标里的应用一起新页面，小窗就跟着弹出来（3820 实测）。
-                    logSkip(param.thisObject, "client_visible_false");
-                } catch (Throwable t) {
-                    XposedBridge.log(TAG + " setClientVisible hook error: " + t.getMessage());
-                }
-            }
-        });
-        if (!hooked) XposedBridge.log(TAG + " WindowToken.setClientVisible missing");
     }
 
     /**
@@ -1252,36 +1111,6 @@ final class FloatKeepAliveHook {
             }
             exemptFloat(record);
             return true;
-        } catch (Throwable t) {
-            return false;
-        }
-    }
-
-    /**
-     * 可见性放行判定的历史实现，当前策略不再使用（见 installRecordHooks 注释）：
-     * 把浮标任务按成可见会让应用起来的新页面把浮标展成小窗，所以这里只放行。
-     * 保留函数与 isDisplayLockedOrOff 是为了下一轮如果要恢复「只在锁屏时保持可见」
-     * 的折中方案时有现成的判定可用。
-     */
-    private static boolean shouldKeepVisible(Object record) {
-        return shouldKeep(record)
-                && !isDisplayLockedOrOff(record)
-                && !sRotationGuard.get()
-                && !sUnlockGuard.get();
-    }
-
-    private static boolean isDisplayLockedOrOff(Object record) {
-        try {
-            Object display = callNoArg(record, "getDisplayContent");
-            if (display == null) return false;
-            Object policy = callNoArg(display, "getDisplayPolicy");
-            if (policy != null) {
-                if (Boolean.TRUE.equals(callNoArg(policy, "isKeyguardShowing"))) return true;
-                if (Boolean.FALSE.equals(readField(policy, "mAwake"))) return true;
-            }
-            Object displayInfo = readField(display, "mDisplayInfo");
-            Object state = readField(displayInfo, "state");
-            return state instanceof Integer && ((Integer) state).intValue() == DISPLAY_STATE_OFF;
         } catch (Throwable t) {
             return false;
         }
