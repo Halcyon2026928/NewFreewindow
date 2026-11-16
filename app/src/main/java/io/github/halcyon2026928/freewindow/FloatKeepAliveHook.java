@@ -70,6 +70,9 @@ final class FloatKeepAliveHook {
     /** Display.STATE_ON / STATE_OFF。 */
     private static final int DISPLAY_STATE_ON = 2;
 
+    /** ApplicationInfo.CATEGORY_GAME：游戏类应用。 */
+    private static final int CATEGORY_GAME = 2;
+
     private static final Set<String> STOP_STATES = new HashSet<>();
 
     static {
@@ -156,7 +159,6 @@ final class FloatKeepAliveHook {
         installFullScreenResetGuard(classLoader);
         installAdjustOptionsGuard(classLoader);
         installFloatEjectGuard(classLoader);
-        installGameDisguiseGuard(classLoader);
         installAudioFocusGuard(classLoader);
         installAwakeGuard(classLoader);
         installScreenOffGuard(classLoader);
@@ -348,6 +350,23 @@ final class FloatKeepAliveHook {
                     if (param.args.length == 0 || !sRecordClass.isInstance(param.args[0])) return;
                     Object record = param.args[0];
                     if (!shouldKeep(record)) return;
+                    /*
+                     * 游戏不能吞掉 pause。
+                     *
+                     * ejoy 这类引擎在 onPause 里切到自己的「后台音频」分支；只丢给它
+                     * topResumedLost + 窗口 NO_WINDOW（pause 被吞）时，它判定状态异常，
+                     * 直接把音频引擎停掉。实测三国志战略版冷启动首次收进浮标后全程无声，
+                     * 唤出小窗再贴边时走的是 pauseInRecentsAnim（pause 没被吞、应用完整
+                     * 收到 onPause），声音立刻恢复。
+                     *
+                     * 所以对游戏放行这条 pause，让应用按自己的后台逻辑继续出声；
+                     * stop 与可见性仍由 setState / addToStopping / setVisibleRequested
+                     * 三道钩子拦着，ActivityRecord 掉不到 cached，进程档位不变。
+                     */
+                    if (isGameRecord(record)) {
+                        logSkip(record, "pause_passthrough_game");
+                        return;
+                    }
                     if (!scheduleFakePause(record)) return;
                     logSkip(record, "pause");
                     markPausing(param.thisObject, record);
@@ -678,41 +697,6 @@ final class FloatKeepAliveHook {
     // ==================== 保活应用的「前台假象」：让换集连播不中断 ====================
 
     /**
-     * 浮标期间让 ColorOS 的游戏判定失效（「伪装成非游戏」）。
-     *
-     * ColorOS 的游戏识别就是一张云端下发的包名表：`GameManagerServiceExtImpl.isGamePkg`
-     * → `GameClassifierImpl.isGame` 只做 `mGameList.contains(pkg)`。游戏身份一旦成立，
-     * 游戏助手/加速器那一串游戏专项策略（含后台处理）就会对它生效。
-     *
-     * 这里只在「包处于浮标保活集合」时把判定改成非游戏：贴边期间不再被当游戏处理，
-     * 回到前台（已离开浮标）立刻恢复原判定，前台游戏优化不受影响。
-     */
-    private static void installGameDisguiseGuard(ClassLoader classLoader) {
-        try {
-            XposedHelpers.findAndHookMethod(
-                    "com.android.server.app.GameManagerServiceExtImpl", classLoader,
-                    "isGamePkg", String.class, new XC_MethodHook() {
-                        @Override
-                        protected void afterHookedMethod(MethodHookParam param) {
-                            try {
-                                if (!Boolean.TRUE.equals(param.getResult())) return;
-                                Object pkgArg = param.args.length > 0 ? param.args[0] : null;
-                                if (!(pkgArg instanceof String)) return;
-                                String pkg = (String) pkgArg;
-                                if (!sExempted.containsKey(pkg)) return;
-                                param.setResult(Boolean.FALSE);
-                                logOnce("gameoff_" + pkg, "game off " + pkg);
-                            } catch (Throwable t) {
-                                XposedBridge.log(TAG + " game disguise error: " + t.getMessage());
-                            }
-                        }
-                    });
-        } catch (Throwable t) {
-            XposedBridge.log(TAG + " game disguise unavailable: " + t.getMessage());
-        }
-    }
-
-    /**
      * 保活期间放行音频焦点。
      *
      * ColorOS 的音频加固（HardeningEnforcer.blockFocusMethod）不允许后台应用申请音频焦点，
@@ -969,7 +953,6 @@ final class FloatKeepAliveHook {
                 } catch (Throwable t) {
                     XposedBridge.log(TAG + " exempt error " + pkg + ": " + t.getMessage());
                 }
-                hansCustomWhite(pkg, true);
             }
         });
         scheduleExemptSweep();
@@ -1022,32 +1005,8 @@ final class FloatKeepAliveHook {
             } catch (Throwable t) {
                 XposedBridge.log(TAG + " exempt off error " + pkg + ": " + t.getMessage());
             }
-            hansCustomWhite(pkg, false);
         }
         if (!sExempted.isEmpty()) scheduleExemptSweep();
-    }
-
-    /**
-     * ColorOS 的 Hans（OplusHansManager）自己那套冻结不看 doze 白名单：
-     * 实测它把浮标里的游戏反复 `freeze uid: ...`，声音断一下又回来（洛克王国这类
-     * 干脆一直冻着）。这里把它自己的「自定义白名单」也挂上，贴边期间不冻、离开即撤。
-     *
-     * 只认 OplusHansManager 这一个类；其它 ROM 上找不到就静默跳过，不影响原有保活。
-     */
-    private static void hansCustomWhite(String pkg, boolean add) {
-        try {
-            Class<?> hansClass = XposedHelpers.findClass(
-                    "com.android.server.am.OplusHansManager", null);
-            Object instance = XposedHelpers.callStaticMethod(hansClass, "getInstance");
-            if (instance == null) return;
-            ArrayList<String> packages = new ArrayList<>(1);
-            packages.add(pkg);
-            XposedHelpers.callMethod(instance,
-                    add ? "addCustomizeWhiteApp" : "removeCustomizeWhiteApp", packages);
-            XposedBridge.log(TAG + (add ? " hans white + " : " hans white - ") + pkg);
-        } catch (Throwable t) {
-            XposedBridge.log(TAG + " hans white failed(" + pkg + "): " + t.getMessage());
-        }
     }
 
     /** 直接走 IDeviceIdleController（system_server 内可用，权限也够）。 */
@@ -1197,6 +1156,21 @@ final class FloatKeepAliveHook {
         } catch (Throwable t) {
             return false;
         }
+    }
+
+    /**
+     * 目标 Activity 是否归类为游戏。
+     *
+     * 只认 ApplicationInfo.category：它在清单里声明，跟包名无关，换游戏也不用改代码。
+     * 读不到就按非游戏处理（保守，维持原来的吞 pause 行为）。
+     */
+    private static boolean isGameRecord(Object record) {
+        Object info = readField(record, "info");
+        if (info == null) return false;
+        Object applicationInfo = readField(info, "applicationInfo");
+        if (applicationInfo == null) return false;
+        Object category = readField(applicationInfo, "category");
+        return category instanceof Integer && ((Integer) category).intValue() == CATEGORY_GAME;
     }
 
     /** 按调用 uid 找保活中的浮标 taskId；找不到返回 -1。 */
