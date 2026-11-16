@@ -70,8 +70,8 @@ final class FloatKeepAliveHook {
     /** Display.STATE_ON / STATE_OFF。 */
     private static final int DISPLAY_STATE_ON = 2;
 
-    /** ApplicationInfo.CATEGORY_GAME：游戏类应用。 */
-    private static final int CATEGORY_GAME = 2;
+    /** ejoy 引擎的 Activity 类名前缀：只有这类页面需要收到 onPause。 */
+    private static final String EJOY_ENGINE_PREFIX = "com.ejoy2dx.";
 
     private static final Set<String> STOP_STATES = new HashSet<>();
 
@@ -351,20 +351,19 @@ final class FloatKeepAliveHook {
                     Object record = param.args[0];
                     if (!shouldKeep(record)) return;
                     /*
-                     * 游戏不能吞掉 pause。
+                     * ejoy 引擎不能吞 pause。
                      *
-                     * ejoy 这类引擎在 onPause 里切到自己的「后台音频」分支；只丢给它
-                     * topResumedLost + 窗口 NO_WINDOW（pause 被吞）时，它判定状态异常，
-                     * 直接把音频引擎停掉。实测三国志战略版冷启动首次收进浮标后全程无声，
-                     * 唤出小窗再贴边时走的是 pauseInRecentsAnim（pause 没被吞、应用完整
-                     * 收到 onPause），声音立刻恢复。
+                     * 它在 onPause 里切到自己的「后台音频」分支；只丢给它 topResumedLost +
+                     * 窗口 NO_WINDOW（pause 被吞）时判定状态异常，直接把音频引擎停掉
+                     * （三国志战略版冷启动首次贴边全程无声，唤出小窗再贴边才恢复）。
                      *
-                     * 所以对游戏放行这条 pause，让应用按自己的后台逻辑继续出声；
-                     * stop 与可见性仍由 setState / addToStopping / setVisibleRequested
-                     * 三道钩子拦着，ActivityRecord 掉不到 cached，进程档位不变。
+                     * 其余引擎（尤其 UE4）正好相反：收到 onPause 就停 tick，洛克王国贴边
+                     * 会被「停住」。所以这里只对 ejoy 放行，其它一律维持吞 pause。
+                     * 放行时 stop 与可见性仍由 setState / addToStopping / setVisibleRequested
+                     * 拦着，ActivityRecord 掉不到 cached。
                      */
-                    if (isGameRecord(record)) {
-                        logSkip(record, "pause_passthrough_game");
+                    if (isEjoyEngineRecord(record)) {
+                        logSkip(record, "pause_passthrough_ejoy");
                         return;
                     }
                     if (!scheduleFakePause(record)) return;
@@ -1159,18 +1158,17 @@ final class FloatKeepAliveHook {
     }
 
     /**
-     * 目标 Activity 是否归类为游戏。
+     * 目标 Activity 是否跑在 ejoy 引擎上（`com.ejoy2dx.*`）。
      *
-     * 只认 ApplicationInfo.category：它在清单里声明，跟包名无关，换游戏也不用改代码。
-     * 读不到就按非游戏处理（保守，维持原来的吞 pause 行为）。
+     * ejoy 这类引擎要收到 onPause 才会切到自己的「后台音频」分支，吞掉 pause 反而直接停声；
+     * 而 UE4（`com.epicgames.ue4.GameActivity`）和其它引擎正好相反，收到 onPause 就停 tick。
+     * 所以按引擎类名前缀判定，而不是按「是不是游戏」——两类游戏的需求是冲突的。
      */
-    private static boolean isGameRecord(Object record) {
+    private static boolean isEjoyEngineRecord(Object record) {
         Object info = readField(record, "info");
         if (info == null) return false;
-        Object applicationInfo = readField(info, "applicationInfo");
-        if (applicationInfo == null) return false;
-        Object category = readField(applicationInfo, "category");
-        return category instanceof Integer && ((Integer) category).intValue() == CATEGORY_GAME;
+        Object className = readField(info, "name");
+        return className instanceof String && ((String) className).startsWith(EJOY_ENGINE_PREFIX);
     }
 
     /** 按调用 uid 找保活中的浮标 taskId；找不到返回 -1。 */
