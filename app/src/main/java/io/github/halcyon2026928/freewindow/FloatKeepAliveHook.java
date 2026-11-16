@@ -253,7 +253,7 @@ final class FloatKeepAliveHook {
             }
         });
 
-        // 3) setState(State, String): 挡住到 STOPPING/STOPPED 的迁移。
+        // 3) setState(State, String): 挡住到 STOPPING/STOPPED 的迁移，并在换集窗口内挡住新页面的 RESUMED。
         hooked |= hookAllSafe(sRecordClass, "setState", new XC_MethodHook() {
             @Override
             protected void beforeHookedMethod(MethodHookParam param) {
@@ -261,11 +261,33 @@ final class FloatKeepAliveHook {
                     Object stateArg = param.args.length > 0 ? param.args[0] : null;
                     if (!(stateArg instanceof Enum)) return;
                     String state = ((Enum<?>) stateArg).name();
-                    if (!STOP_STATES.contains(state)) return;
-                    if (!shouldKeep(param.thisObject)) return;
                     if (((Method) param.method).getReturnType() != Void.TYPE) return;
-                    logSkip(param.thisObject, "state_" + state);
-                    param.setResult(null);
+                    if (!shouldKeep(param.thisObject)) return;
+                    if (STOP_STATES.contains(state)) {
+                        logSkip(param.thisObject, "state_" + state);
+                        param.setResult(null);
+                        return;
+                    }
+                    /*
+                     * 换集（浮标内应用自己起新页面）会 resume 一个新 Activity。resume 的
+                     * 触发链是 setState(RESUMED) -> onActivityStateChanged -> setResumedActivity
+                     * -> onTaskFocusChanged -> onFocusChanged(mHasFocus=true)，最后输入焦点落到
+                     * 这个窗口上。而窗口可见性又被「换集不弹窗」那道钩子压成 false，最终
+                     * isFocused=true + isVisible=false —— 输入派发找不到可见的聚焦窗口，之后
+                     * 一调音量就 Input dispatching timed out（无聚焦窗口）ANR。
+                     *
+                     * 处理：在换集窗口内，让新页面停在 started、别进 RESUMED（客户端照常收到
+                     * onResume、继续播），这样 onActivityStateChanged 不触发，焦点不转移，也不弹窗。
+                     * 用户点浮标打开时 sUserFloatOpenAt 生效，不会误伤。
+                     */
+                    if ("RESUMED".equals(state)
+                            && SystemClock.uptimeMillis() < sSuppressFloatEjectAt
+                            && SystemClock.uptimeMillis() >= sUserFloatOpenAt) {
+                        int taskId = taskIdOf(param.thisObject);
+                        logOnce("skip_resume_" + taskId,
+                                "task" + taskId + " 换集新页面不进入 RESUMED（保持 started，焦点不动）");
+                        param.setResult(null);
+                    }
                 } catch (Throwable t) {
                     XposedBridge.log(TAG + " setState hook error: " + t.getMessage());
                 }
