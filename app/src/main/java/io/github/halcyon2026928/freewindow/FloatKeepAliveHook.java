@@ -156,6 +156,7 @@ final class FloatKeepAliveHook {
         installFullScreenResetGuard(classLoader);
         installAdjustOptionsGuard(classLoader);
         installFloatEjectGuard(classLoader);
+        installGameDisguiseGuard(classLoader);
         installAudioFocusGuard(classLoader);
         installAwakeGuard(classLoader);
         installScreenOffGuard(classLoader);
@@ -675,6 +676,41 @@ final class FloatKeepAliveHook {
     }
 
     // ==================== 保活应用的「前台假象」：让换集连播不中断 ====================
+
+    /**
+     * 浮标期间让 ColorOS 的游戏判定失效（「伪装成非游戏」）。
+     *
+     * ColorOS 的游戏识别就是一张云端下发的包名表：`GameManagerServiceExtImpl.isGamePkg`
+     * → `GameClassifierImpl.isGame` 只做 `mGameList.contains(pkg)`。游戏身份一旦成立，
+     * 游戏助手/加速器那一串游戏专项策略（含后台处理）就会对它生效。
+     *
+     * 这里只在「包处于浮标保活集合」时把判定改成非游戏：贴边期间不再被当游戏处理，
+     * 回到前台（已离开浮标）立刻恢复原判定，前台游戏优化不受影响。
+     */
+    private static void installGameDisguiseGuard(ClassLoader classLoader) {
+        try {
+            XposedHelpers.findAndHookMethod(
+                    "com.android.server.app.GameManagerServiceExtImpl", classLoader,
+                    "isGamePkg", String.class, new XC_MethodHook() {
+                        @Override
+                        protected void afterHookedMethod(MethodHookParam param) {
+                            try {
+                                if (!Boolean.TRUE.equals(param.getResult())) return;
+                                Object pkgArg = param.args.length > 0 ? param.args[0] : null;
+                                if (!(pkgArg instanceof String)) return;
+                                String pkg = (String) pkgArg;
+                                if (!sExempted.containsKey(pkg)) return;
+                                param.setResult(Boolean.FALSE);
+                                logOnce("gameoff_" + pkg, "game off " + pkg);
+                            } catch (Throwable t) {
+                                XposedBridge.log(TAG + " game disguise error: " + t.getMessage());
+                            }
+                        }
+                    });
+        } catch (Throwable t) {
+            XposedBridge.log(TAG + " game disguise unavailable: " + t.getMessage());
+        }
+    }
 
     /**
      * 保活期间放行音频焦点。
