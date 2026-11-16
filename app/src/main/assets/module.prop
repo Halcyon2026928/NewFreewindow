@@ -1,6 +1,6 @@
 id=io.github.halcyon2026928.freewindow
 name=灵动坞OS
-version=v3.6
-versionCode=24
+version=v3.7
+versionCode=25
 author=halcyon2026928
 description=隐藏自由小窗底部白条 / 顶部三点菜单栏，坞窗卡片、贴边保活与单应用静音，可在应用内独立开关，重开自由小窗即时生效
