@@ -70,9 +70,6 @@ final class FloatKeepAliveHook {
     /** Display.STATE_ON / STATE_OFF。 */
     private static final int DISPLAY_STATE_ON = 2;
 
-    /** ejoy 引擎的 Activity 类名前缀：只有这类页面需要收到 onPause。 */
-    private static final String EJOY_ENGINE_PREFIX = "com.ejoy2dx.";
-
     private static final Set<String> STOP_STATES = new HashSet<>();
 
     static {
@@ -350,22 +347,6 @@ final class FloatKeepAliveHook {
                     if (param.args.length == 0 || !sRecordClass.isInstance(param.args[0])) return;
                     Object record = param.args[0];
                     if (!shouldKeep(record)) return;
-                    /*
-                     * ejoy 引擎不能吞 pause。
-                     *
-                     * 它在 onPause 里切到自己的「后台音频」分支；只丢给它 topResumedLost +
-                     * 窗口 NO_WINDOW（pause 被吞）时判定状态异常，直接把音频引擎停掉
-                     * （三国志战略版冷启动首次贴边全程无声，唤出小窗再贴边才恢复）。
-                     *
-                     * 其余引擎（尤其 UE4）正好相反：收到 onPause 就停 tick，洛克王国贴边
-                     * 会被「停住」。所以这里只对 ejoy 放行，其它一律维持吞 pause。
-                     * 放行时 stop 与可见性仍由 setState / addToStopping / setVisibleRequested
-                     * 拦着，ActivityRecord 掉不到 cached。
-                     */
-                    if (isEjoyEngineRecord(record)) {
-                        logSkip(record, "pause_passthrough_ejoy");
-                        return;
-                    }
                     if (!scheduleFakePause(record)) return;
                     logSkip(record, "pause");
                     markPausing(param.thisObject, record);
@@ -952,6 +933,7 @@ final class FloatKeepAliveHook {
                 } catch (Throwable t) {
                     XposedBridge.log(TAG + " exempt error " + pkg + ": " + t.getMessage());
                 }
+                hansCustomWhite(pkg, true);
             }
         });
         scheduleExemptSweep();
@@ -1004,8 +986,32 @@ final class FloatKeepAliveHook {
             } catch (Throwable t) {
                 XposedBridge.log(TAG + " exempt off error " + pkg + ": " + t.getMessage());
             }
+            hansCustomWhite(pkg, false);
         }
         if (!sExempted.isEmpty()) scheduleExemptSweep();
+    }
+
+    /**
+     * ColorOS 的 Hans（OplusHansManager）自己那套冻结不看 doze 白名单：
+     * 实测它把浮标里的游戏反复 `freeze uid: ...`，声音断一下又回来（洛克王国这类
+     * 干脆一直冻着）。这里把它自己的「自定义白名单」也挂上，贴边期间不冻、离开即撤。
+     *
+     * 只认 OplusHansManager 这一个类；其它 ROM 上找不到就静默跳过，不影响原有保活。
+     */
+    private static void hansCustomWhite(String pkg, boolean add) {
+        try {
+            Class<?> hansClass = XposedHelpers.findClass(
+                    "com.android.server.am.OplusHansManager", null);
+            Object instance = XposedHelpers.callStaticMethod(hansClass, "getInstance");
+            if (instance == null) return;
+            ArrayList<String> packages = new ArrayList<>(1);
+            packages.add(pkg);
+            XposedHelpers.callMethod(instance,
+                    add ? "addCustomizeWhiteApp" : "removeCustomizeWhiteApp", packages);
+            XposedBridge.log(TAG + (add ? " hans white + " : " hans white - ") + pkg);
+        } catch (Throwable t) {
+            XposedBridge.log(TAG + " hans white failed(" + pkg + "): " + t.getMessage());
+        }
     }
 
     /** 直接走 IDeviceIdleController（system_server 内可用，权限也够）。 */
@@ -1155,20 +1161,6 @@ final class FloatKeepAliveHook {
         } catch (Throwable t) {
             return false;
         }
-    }
-
-    /**
-     * 目标 Activity 是否跑在 ejoy 引擎上（`com.ejoy2dx.*`）。
-     *
-     * ejoy 这类引擎要收到 onPause 才会切到自己的「后台音频」分支，吞掉 pause 反而直接停声；
-     * 而 UE4（`com.epicgames.ue4.GameActivity`）和其它引擎正好相反，收到 onPause 就停 tick。
-     * 所以按引擎类名前缀判定，而不是按「是不是游戏」——两类游戏的需求是冲突的。
-     */
-    private static boolean isEjoyEngineRecord(Object record) {
-        Object info = readField(record, "info");
-        if (info == null) return false;
-        Object className = readField(info, "name");
-        return className instanceof String && ((String) className).startsWith(EJOY_ENGINE_PREFIX);
     }
 
     /** 按调用 uid 找保活中的浮标 taskId；找不到返回 -1。 */
