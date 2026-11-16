@@ -8,7 +8,7 @@ import android.database.Cursor;
 import android.graphics.Bitmap;
 import android.graphics.PixelFormat;
 import android.graphics.Rect;
-import android.graphics.Region;
+import android.graphics.Rect;
 import android.graphics.drawable.GradientDrawable;
 import android.os.Build;
 import android.os.Handler;
@@ -334,6 +334,44 @@ public class MainHook implements IXposedHookLoadPackage {
                 XposedBridge.log(TAG + " float limit insert hook failed: " + t.getMessage());
             }
 
+            // 诊断：addFloatHandle 被谁挡住。
+            // 部分机型（PLK110 实测）里 updateInfoMapForAdd 一次都没被调用，说明请求在
+            // 进入它之前就被 addFloatHandle 自己挡掉了（isInFloatingList / 数量判断）。
+            // 这里只记录放行与否，不改任何行为。
+            try {
+                for (final Method m : fhcCls.getDeclaredMethods()) {
+                    if (!"addFloatHandle".equals(m.getName())) continue;
+                    XposedBridge.hookMethod(m, new XC_MethodHook() {
+                        @Override
+                        protected void beforeHookedMethod(MethodHookParam param) {
+                            try {
+                                Object info = param.args.length > 0 ? param.args[0] : null;
+                                if (info == null) return;
+                                Object listObj = XposedHelpers.getObjectField(
+                                        param.thisObject, "mFloatHandleInfoList");
+                                int size = (listObj instanceof List) ? ((List) listObj).size() : -1;
+                                int taskId = -1;
+                                try {
+                                    taskId = XposedHelpers.getIntField(info, "taskId");
+                                } catch (Throwable ignored) {
+                                }
+                                boolean inList = false;
+                                try {
+                                    inList = Boolean.TRUE.equals(XposedHelpers.callMethod(
+                                            param.thisObject, "isInFloatingList", taskId));
+                                } catch (Throwable ignored) {
+                                }
+                                XposedBridge.log(TAG + " addFloatHandle " + m.getName()
+                                        + " size=" + size + " taskId=" + taskId + " inList=" + inList);
+                            } catch (Throwable ignored) {
+                            }
+                        }
+                    });
+                }
+            } catch (Throwable t) {
+                XposedBridge.log(TAG + " addFloatHandle probe failed: " + t.getMessage());
+            }
+
             // 解除上限的第三个硬编码点：removeFloatHandleInner 只写了 size==1 / size==2，
             // size>=3 落到 else 打一行 "mFloatHandler removeFloatHandle ERROR" 直接返回，
             // 于是坞窗里的「清除」「取消运行」全都关不掉小窗（日志里 size 一直停在 3）。
@@ -506,7 +544,11 @@ public class MainHook implements IXposedHookLoadPackage {
             hookSingleTapUpMenuBlock(captionViewClass);
 
             // 第三层：让触摸穿透应用（开关：hide_three_dot_menu）
-            hookTouchThroughCarve(captionViewClass);
+            // 已废弃：早先按 mHandleButtonRegion 从窗口触摸区里挖洞，在部分机型上
+            // 那个 region 覆盖整条标题栏（实测 PLK110：mHandleButtonRegion=[243,-52][1029,142]），
+            // 挖完标题栏不再接收触摸，自由小窗就无法拖动。三点按钮在 initCaptionView 里已经
+            // 整块移除，点击弹菜单也由 onSingleTapUp 拦截，这层已无必要。
+            // hookTouchThroughCarve(captionViewClass);
 
             // 第四层：点击悬浮球弹出坞窗
             hookFloatHandleClick(lpparam.classLoader);
@@ -523,46 +565,6 @@ public class MainHook implements IXposedHookLoadPackage {
         // } catch (Throwable t) {
         //     XposedBridge.log(TAG + " MirageWindowHook failed: " + t.getMessage());
         // }
-    }
-
-    /**
-     * hook FlexibleCaptionView.updateTouchableRegion(Region)：
-     * 每次标题栏把触摸区域应用到 Surface 前，把三点按钮触摸区域挖空，
-     * 使该位置触摸穿透到自由小窗中的应用。
-     */
-    private void hookTouchThroughCarve(Class<?> captionViewClass) {
-        try {
-            Class<?> baseClass = XposedHelpers.findClass(
-                    "com.android.server.wm.FlexibleCaptionView", captionViewClass.getClassLoader());
-
-            XposedHelpers.findAndHookMethod(baseClass, "updateTouchableRegion", Region.class,
-                    new XC_MethodHook() {
-                        @Override
-                        protected void beforeHookedMethod(MethodHookParam param) {
-                            try {
-                                if (!hideThreeDot) return;
-
-                                Region region = (Region) param.args[0];
-                                if (region == null) return;
-
-                                Object regionMgr = XposedHelpers.getObjectField(param.thisObject, "mFlexibleCaptionViewRegionMgr");
-                                if (regionMgr == null) return;
-
-                                Rect btn = (Rect) XposedHelpers.getObjectField(regionMgr, "mHandleButtonRegion");
-                                if (btn == null || btn.isEmpty()) return;
-
-                                region.op(btn.left, btn.top, btn.right, btn.bottom, Region.Op.DIFFERENCE);
-                                XposedBridge.log(TAG + " carved three-dot touch region for touch-through: "
-                                        + btn.toShortString());
-                            } catch (Throwable t) {
-                                XposedBridge.log(TAG + " updateTouchableRegion carve error: " + t.getMessage());
-                            }
-                        }
-                    });
-            XposedBridge.log(TAG + " touch-through carve hook success");
-        } catch (Throwable t) {
-            XposedBridge.log(TAG + " hook updateTouchableRegion failed: " + t.getMessage());
-        }
     }
 
     /**
