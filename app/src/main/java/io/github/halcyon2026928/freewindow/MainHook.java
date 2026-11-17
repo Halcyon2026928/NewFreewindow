@@ -1618,6 +1618,10 @@ public class MainHook implements IXposedHookLoadPackage {
             if (taskId > 0) MirageWindowHook.clearHangUp(taskId);
         } catch (Throwable ignored) {
         }
+        try {
+            if (taskId > 0) FloatKeepAliveHook.onFloatRestored(taskId);
+        } catch (Throwable ignored) {
+        }
 
         // 先收起坞窗、恢复悬浮球；官方恢复成功后悬浮球会由系统重新隐藏。
         removeFloatDock();

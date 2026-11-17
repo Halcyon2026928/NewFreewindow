@@ -9,6 +9,7 @@ import android.os.Handler;
 import android.os.IBinder;
 import android.os.Looper;
 import android.os.SystemClock;
+import android.util.SparseArray;
 
 import java.io.File;
 import java.lang.ref.WeakReference;
@@ -78,6 +79,8 @@ final class FloatKeepAliveHook {
     private static final String DCS_CLASS = "com.android.server.wm.OplusFlexibleDCSManager";
     private static final String MIRAGE_WMS_CLASS = "com.android.server.wm.OplusMirageWindowManagerService";
     private static final String MIRAGE_DISPLAY_CLASS = "com.android.server.display.OplusMirageDisplayManagerService";
+    /** Hans 真正执行冻结的地方。 */
+    private static final String HANS_FREEZE_CLASS = "com.android.server.am.OplusHansProcessFreeze";
     /** castMode 4 = Mirage_background_display（后台串流），3 是应用分享，5 是车机。 */
     private static final int MIRAGE_CAST_MODE_BACKGROUND = 4;
 
@@ -89,6 +92,8 @@ final class FloatKeepAliveHook {
     private static final long MIRAGE_RELEASE_DELAY_MS = 1200L;
     /** 任务搬走后原生会删浮标，这个窗口内压住它。 */
     private static final long MIRAGE_KEEP_FLOAT_MS = 2800L;
+    /** 建屏之后巡检一次：任务已经回到主屏就把空屏收掉，别留给系统装别的应用。 */
+    private static final long MIRAGE_CHECK_DELAY_MS = 5000L;
 
     /** Display.STATE_ON / STATE_OFF。 */
     private static final int DISPLAY_STATE_ON = 2;
@@ -124,6 +129,8 @@ final class FloatKeepAliveHook {
 
     /** 已经搬到幻影屏的任务：taskId -> displayId。 */
     private static final Map<Integer, Integer> sMirageTasks = new ConcurrentHashMap<>();
+    /** 同上，留一份 Task 弱引用，用来巡检任务是否已经离开幻影屏。 */
+    private static final Map<Integer, WeakReference<Object>> sMirageTaskRefs = new ConcurrentHashMap<>();
     /** 当前正在幻影屏上跑的任务，-1 表示没有。 */
     private static volatile int sMirageTaskId = -1;
     /** 这个时间点之前不许删浮标（任务刚搬走的过渡期）。 */
@@ -312,6 +319,22 @@ final class FloatKeepAliveHook {
             });
         }
 
+        // 搬到虚拟屏只是让任务继续跑，ColorOS 的 Hans 仍会把进程按 cached 冻掉
+        // （日志实证：mirage 屏建好之后照样 freeze uid），所以还要在冻结真正落刀的地方拦住。
+        Class<?> hansFreeze = findClassSafe(classLoader, HANS_FREEZE_CLASS);
+        if (hansFreeze != null) {
+            ok |= hookAllSafe(hansFreeze, "freezeProcess", new XC_MethodHook() {
+                @Override
+                protected void beforeHookedMethod(MethodHookParam param) {
+                    Object pidArg = param.args.length > 1 ? param.args[1] : null;
+                    if (isEngineProcess(param.thisObject, pidArg instanceof Integer
+                            ? ((Integer) pidArg).intValue() : -1)) {
+                        param.setResult(null);
+                    }
+                }
+            });
+        }
+
         XposedBridge.log(TAG + " mirage hooks: " + (ok ? "ok" : "missing"));
         return ok;
     }
@@ -363,10 +386,55 @@ final class FloatKeepAliveHook {
             XposedHelpers.callMethod(manager, "notifyCastSuccess", displayId);
             markTaskLively(task);
             sMirageTasks.put(taskId, displayId);
+            sMirageTaskRefs.put(taskId, new WeakReference<>(task));
             sMirageTaskId = taskId;
             XposedBridge.log(TAG + " mirage task" + taskId + " -> display" + displayId);
+
+            Handler handler = sHandler;
+            if (handler != null) {
+                final int watchTaskId = taskId;
+                final int watchDisplayId = displayId;
+                handler.postDelayed(new Runnable() {
+                    @Override
+                    public void run() {
+                        dropMirageIfTaskLeft(watchTaskId, watchDisplayId);
+                    }
+                }, MIRAGE_CHECK_DELAY_MS);
+            }
         } catch (Throwable t) {
             XposedBridge.log(TAG + " mirage failed: " + t);
+        }
+    }
+
+    /**
+     * 任务被还原回主屏后，幻影屏就空了；空屏留着会被系统当成可用屏幕，
+     * 把别的应用装上去（实测 lsposed manager 就被放进来过），所以这里主动收掉。
+     */
+    private static void dropMirageIfTaskLeft(int taskId, int displayId) {
+        Integer current = sMirageTasks.get(taskId);
+        if (current == null || current.intValue() != displayId) return;
+        WeakReference<Object> ref = sMirageTaskRefs.get(taskId);
+        Object task = ref == null ? null : ref.get();
+        int now = task == null ? -1 : taskDisplayId(task);
+        if (now == displayId) return;
+        XposedBridge.log(TAG + " mirage reclaim display" + displayId + " (task" + taskId
+                + " now on display" + now + ")");
+        sMirageTaskId = taskId;
+        releaseMirage();
+    }
+
+    private static int taskDisplayId(Object task) {
+        if (task == null) return -1;
+        Object value = callNoArg(task, "getDisplayId");
+        if (value instanceof Integer) return ((Integer) value).intValue();
+        return fieldInt(task, "mDisplayId");
+    }
+
+    /** 坞窗还原时由 MainHook 调进来：把还在幻影屏上的任务收干净。 */
+    static void onFloatRestored(int taskId) {
+        if (sMirageTasks.containsKey(taskId)) {
+            sMirageTaskId = taskId;
+            releaseMirage();
         }
     }
 
@@ -449,6 +517,7 @@ final class FloatKeepAliveHook {
 
     private static void clearMirage() {
         sMirageTasks.clear();
+        sMirageTaskRefs.clear();
         sMirageTaskId = -1;
         sMirageKeepFloatUntil = 0L;
     }
@@ -486,8 +555,25 @@ final class FloatKeepAliveHook {
         return engine;
     }
 
-    private static int fieldInt(Object instance, String name) {
-        Object value = readField(instance, name);
+    /**
+     * 冻结落刀点上的判定：只拦已经认出引擎的包，其它进程一概不动。
+     * 进程名可能是 com.tencent.nrc:xxx，取冒号前那段当包名。
+     */
+    private static boolean isEngineProcess(Object host, int pid) {
+        if (host == null || pid <= 0) return false;
+        Object list = readField(host, "mProcFrzStateRecList");
+        Object app = list instanceof SparseArray ? ((SparseArray<?>) list).get(pid) : null;
+        Object name = readField(app, "processName");
+        if (!(name instanceof String)) return false;
+        String processName = (String) name;
+        int colon = processName.indexOf(':');
+        String pkg = colon > 0 ? processName.substring(0, colon) : processName;
+        if (ENGINE_NONE.equals(sEngineCache.get(pkg))) return false;
+        XposedBridge.log(TAG + " skip hans freeze " + processName);
+        return true;
+    }
+
+    private static int fieldInt(Object instance, String name) {        Object value = readField(instance, name);
         return value instanceof Integer ? ((Integer) value).intValue() : -1;
     }
 
