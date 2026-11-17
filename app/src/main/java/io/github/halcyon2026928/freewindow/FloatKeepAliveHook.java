@@ -4,12 +4,10 @@ import android.content.ComponentName;
 import android.content.Intent;
 import android.content.res.Configuration;
 import android.os.Binder;
-import android.os.Bundle;
 import android.os.Handler;
 import android.os.IBinder;
 import android.os.Looper;
 import android.os.SystemClock;
-import android.util.SparseArray;
 
 import java.io.File;
 import java.lang.ref.WeakReference;
@@ -72,17 +70,8 @@ final class FloatKeepAliveHook {
     /** ColorOS 音频加固：它会拦掉后台应用的音频焦点申请。 */
     private static final String HARDENING_ENFORCER_CLASS = "com.android.server.audio.HardeningEnforcer";
 
-    /**
-     * 幻影窗口（后台串流）：ColorOS 游戏助手的「后台挂机」就靠这套。
-     * 把任务搬到一块虚拟屏上继续跑，任务不算掉后台，也不会收到 onPause。
-     */
+    /** 贴边最小化入口：游戏在这里接幻影窗口（见 MirageWindowHook），其它应用走 mini 保活。 */
     private static final String DCS_CLASS = "com.android.server.wm.OplusFlexibleDCSManager";
-    private static final String MIRAGE_WMS_CLASS = "com.android.server.wm.OplusMirageWindowManagerService";
-    private static final String MIRAGE_DISPLAY_CLASS = "com.android.server.display.OplusMirageDisplayManagerService";
-    /** Hans 真正执行冻结的地方。 */
-    private static final String HANS_FREEZE_CLASS = "com.android.server.am.OplusHansProcessFreeze";
-    /** castMode 4 = Mirage_background_display（后台串流），3 是应用分享，5 是车机。 */
-    private static final int MIRAGE_CAST_MODE_BACKGROUND = 4;
 
     /** 引擎判定的「认不出来」结果，此时维持原来的 mini 保活。 */
     private static final String ENGINE_NONE = "none";
@@ -93,14 +82,6 @@ final class FloatKeepAliveHook {
             "setMaintainTaskState", "setSkipMoveTaskToBack",
             "dontPauseAfterQActivityIfNeed"
     };
-    /** 建屏要 400ms 左右，等贴边动画走完再搬，避免两套动画打架。 */
-    private static final long MIRAGE_START_DELAY_MS = 400L;
-    /** 恢复时等原生搬回主屏，再释放虚拟屏。 */
-    private static final long MIRAGE_RELEASE_DELAY_MS = 1200L;
-    /** 任务搬走后原生会删浮标，这个窗口内压住它。 */
-    private static final long MIRAGE_KEEP_FLOAT_MS = 2800L;
-    /** 建屏之后巡检一次：任务已经回到主屏就把空屏收掉，别留给系统装别的应用。 */
-    private static final long MIRAGE_CHECK_DELAY_MS = 5000L;
 
     /** Display.STATE_ON / STATE_OFF。 */
     private static final int DISPLAY_STATE_ON = 2;
@@ -131,17 +112,8 @@ final class FloatKeepAliveHook {
     private static Method sGetInstance;
     private static Method sIsInFloatingList;
 
-    /** system_server 侧的 classLoader，装 hook 时存下来，运行期建屏要用。 */
+    /** system_server 侧的 classLoader，装 hook 时存下来，运行期判定引擎要用。 */
     private static ClassLoader sClassLoader;
-
-    /** 已经搬到幻影屏的任务：taskId -> displayId。 */
-    private static final Map<Integer, Integer> sMirageTasks = new ConcurrentHashMap<>();
-    /** 同上，留一份 Task 弱引用，用来巡检任务是否已经离开幻影屏。 */
-    private static final Map<Integer, WeakReference<Object>> sMirageTaskRefs = new ConcurrentHashMap<>();
-    /** 当前正在幻影屏上跑的任务，-1 表示没有。 */
-    private static volatile int sMirageTaskId = -1;
-    /** 这个时间点之前不许删浮标（任务刚搬走的过渡期）。 */
-    private static volatile long sMirageKeepFloatUntil = 0L;
 
     /**
      * 浮标内起新页面之后的一小段窗口期：这段时间里不把浮标 task 移出浮标。
@@ -232,7 +204,7 @@ final class FloatKeepAliveHook {
         installScreenOffGuard(classLoader);
         installDisplayStateGuard(classLoader);
         installKeyguardLockGuard(classLoader);
-        boolean mirageHooked = installMirageHangUp(classLoader);
+        boolean livelyMarks = installLivelyMarks(classLoader);
         sExemptExec.execute(new Runnable() {
             @Override
             public void run() {
@@ -242,249 +214,34 @@ final class FloatKeepAliveHook {
 
         XposedBridge.log(TAG + " installed (pauseSkip=" + pauseHooked
                 + ", floatingController=" + (sIsInFloatingList != null ? "ok" : "missing")
-                + ", recordHooks=" + recordHooked + ", mirage=" + mirageHooked + ")");
+                + ", livelyMarks=" + livelyMarks + ")");
     }
 
-    // ==================== 游戏贴边：搬到幻影窗口 ====================
+    // ==================== 贴边时的任务标记 ====================
 
     /**
-     * 游戏贴边走幻影窗口（MirageWindow），其它应用维持原来的 mini 保活。
+     * 贴边时给任务打一整套保活标记（3.2 的做法，对所有应用都打，before + after 各一次）。
      *
-     * 为什么走这条路：贴边后游戏进程会被 ColorOS 的 Hans 当成 cached 冻掉
-     * （日志里 freeze uid ... / unfreeze reason: Packet 反复出现），引擎的音频线程一冻就没声音。
-     * 游戏助手的「后台挂机」是把任务搬到一块虚拟屏（castMode=4 的后台串流屏）上继续跑，
-     * 任务始终没掉到后台，既不被冻，也收不到 onPause / NO_WINDOW。
+     * 真正的「后台串流继续跑」在 MirageWindowHook 里，只对游戏启用；
+     * 这里只负责标记，普通应用维持原来的 mini 保活。
      */
-    private static boolean installMirageHangUp(ClassLoader classLoader) {
-        boolean ok = false;
-
+    private static boolean installLivelyMarks(ClassLoader classLoader) {
         Class<?> dcs = findClassSafe(classLoader, DCS_CLASS);
-        if (dcs != null) {
-            ok |= hookAllSafe(dcs, "startMinimize", new XC_MethodHook() {
-                @Override
-                protected void beforeHookedMethod(MethodHookParam param) {
-                    // 3.2 的做法：贴边前就先把任务标记成「继续跑」，不分游戏还是应用
-                    markTaskLively(taskArg(param));
-                }
-
-                @Override
-                protected void afterHookedMethod(MethodHookParam param) {
-                    Object task = taskArg(param);
-                    markTaskLively(task);
-                    queueMirage(task);
-                }
-            });
-        }
-
-        Class<?> mirageWms = findClassSafe(classLoader, MIRAGE_WMS_CLASS);
-        if (mirageWms != null) {
-            // 挂起期任务已经在虚拟屏上，别让它退到后台
-            ok |= hookAllSafe(mirageWms, "moveTaskToBack", new XC_MethodHook() {
-                @Override
-                protected void beforeHookedMethod(MethodHookParam param) {
-                    if (isMirageTask(param.args.length > 0 ? param.args[0] : null)) {
-                        param.setResult(null);
-                    }
-                }
-            });
-            // 原生把任务搬回主屏之后，自己的状态要跟着清掉，
-            // 否则第二次贴边会被「已经在挂起中」挡住。
-            ok |= hookAllSafe(mirageWms, "moveStacksToDefaultDisplay", new XC_MethodHook() {
-                @Override
-                protected void afterHookedMethod(MethodHookParam param) {
-                    clearMirage();
-                }
-            });
-        }
-
-        Class<?> controller = findClassSafe(classLoader, CONTROLLER_CLASS);
-        if (controller != null) {
-            // 任务刚搬走那一小段过渡里原生会删浮标，压住它
-            ok |= hookAllSafe(controller, "removeFloatHandle", new XC_MethodHook() {
-                @Override
-                protected void beforeHookedMethod(MethodHookParam param) {
-                    if (SystemClock.uptimeMillis() > sMirageKeepFloatUntil) return;
-                    int taskId = param.args.length > 0 && param.args[0] instanceof Integer
-                            ? ((Integer) param.args[0]).intValue() : -1;
-                    if (taskId < 0) {
-                        taskId = taskIdOfObject(param.args.length > 1 ? param.args[1] : null);
-                    }
-                    if (taskId >= 0 && sMirageTasks.containsKey(taskId)) {
-                        param.setResult(null);
-                    }
-                }
-            });
-            // 用户从浮标把游戏唤回来：等原生搬完再释放虚拟屏
-            ok |= hookAllSafe(controller, "startActivityByFloatInfo", new XC_MethodHook() {
-                @Override
-                protected void afterHookedMethod(MethodHookParam param) {
-                    scheduleMirageRelease();
-                }
-            });
-        }
-
-        Class<?> display = findClassSafe(classLoader, MIRAGE_DISPLAY_CLASS);
-        if (display != null) {
-            // 原生自己释放了虚拟屏（自愈路径），状态同步清掉
-            ok |= hookAllSafe(display, "releaseVirtualDisplayDevice", new XC_MethodHook() {
-                @Override
-                protected void afterHookedMethod(MethodHookParam param) {
-                    clearMirage();
-                }
-            });
-        }
-
-        // 搬到虚拟屏只是让任务继续跑，ColorOS 的 Hans 仍会把进程按 cached 冻掉
-        // （日志实证：mirage 屏建好之后照样 freeze uid），所以还要在冻结真正落刀的地方拦住。
-        Class<?> hansFreeze = findClassSafe(classLoader, HANS_FREEZE_CLASS);
-        if (hansFreeze != null) {
-            ok |= hookAllSafe(hansFreeze, "freezeProcess", new XC_MethodHook() {
-                @Override
-                protected void beforeHookedMethod(MethodHookParam param) {
-                    Object pidArg = param.args.length > 1 ? param.args[1] : null;
-                    if (isEngineProcess(param.thisObject, pidArg instanceof Integer
-                            ? ((Integer) pidArg).intValue() : -1)) {
-                        param.setResult(null);
-                    }
-                }
-            });
-        }
-
-        XposedBridge.log(TAG + " mirage hooks: " + (ok ? "ok" : "missing"));
-        return ok;
-    }
-
-    /** 贴边触发最小化：判定是游戏才排队搬屏，非游戏原样走 mini 保活。 */
-    private static void queueMirage(Object task) {
-        if (task == null || !keepAliveEnabled()) return;
-        int taskId = taskIdOfObject(task);
-        if (taskId < 0) return;
-        ComponentName top = topActivityOf(task);
-        if (top == null) return;
-        String pkg = top.getPackageName();
-        String engine = engineOfPackage(pkg, top.getClassName());
-        if (ENGINE_NONE.equals(engine)) return;
-
-        sMirageTaskId = taskId;
-        sMirageKeepFloatUntil = SystemClock.uptimeMillis() + MIRAGE_KEEP_FLOAT_MS;
-        XposedBridge.log(TAG + " mirage queue task" + taskId + " " + pkg + " engine=" + engine);
-
-        Handler handler = sHandler;
-        if (handler == null) return;
-        final int id = taskId;
-        final String packageName = pkg;
-        final Object target = task;
-        handler.postDelayed(new Runnable() {
+        if (dcs == null) return false;
+        return hookAllSafe(dcs, "startMinimize", new XC_MethodHook() {
             @Override
-            public void run() {
-                startMirageWindow(id, packageName, target);
+            protected void beforeHookedMethod(MethodHookParam param) {
+                markTaskLively(taskArg(param));
             }
-        }, MIRAGE_START_DELAY_MS);
-    }
 
-    /** 建一块后台串流虚拟屏，把任务搬上去。 */
-    private static void startMirageWindow(int taskId, String pkg, Object task) {
-        try {
-            Class<?> managerClass = XposedHelpers.findClass(MIRAGE_DISPLAY_CLASS, sClassLoader);
-            Object manager = XposedHelpers.callStaticMethod(managerClass, "getInstance");
-            if (manager == null) {
-                XposedBridge.log(TAG + " mirage failed: manager null");
-                return;
+            @Override
+            protected void afterHookedMethod(MethodHookParam param) {
+                markTaskLively(taskArg(param));
             }
-            int displayId = ((Integer) XposedHelpers.callMethod(
-                    manager, "createVirtualDisplayDevice", mirageOptions(pkg))).intValue();
-            if (displayId <= 0) {
-                XposedBridge.log(TAG + " mirage failed: displayId=" + displayId);
-                return;
-            }
-            XposedHelpers.callMethod(manager, "moveTaskToDisplay", taskId, displayId, true);
-            XposedHelpers.callMethod(manager, "notifyCastSuccess", displayId);
-            markTaskLively(task);
-            sMirageTasks.put(taskId, displayId);
-            sMirageTaskRefs.put(taskId, new WeakReference<>(task));
-            sMirageTaskId = taskId;
-            XposedBridge.log(TAG + " mirage task" + taskId + " -> display" + displayId);
-
-            Handler handler = sHandler;
-            if (handler != null) {
-                final int watchTaskId = taskId;
-                final int watchDisplayId = displayId;
-                handler.postDelayed(new Runnable() {
-                    @Override
-                    public void run() {
-                        dropMirageIfTaskLeft(watchTaskId, watchDisplayId);
-                    }
-                }, MIRAGE_CHECK_DELAY_MS);
-            }
-        } catch (Throwable t) {
-            XposedBridge.log(TAG + " mirage failed: " + t);
-        }
+        });
     }
 
-    /**
-     * 任务被还原回主屏后，幻影屏就空了；空屏留着会被系统当成可用屏幕，
-     * 把别的应用装上去（实测 lsposed manager 就被放进来过），所以这里主动收掉。
-     */
-    private static void dropMirageIfTaskLeft(int taskId, int displayId) {
-        Integer current = sMirageTasks.get(taskId);
-        if (current == null || current.intValue() != displayId) return;
-        WeakReference<Object> ref = sMirageTaskRefs.get(taskId);
-        Object task = ref == null ? null : ref.get();
-        int now = task == null ? -1 : taskDisplayId(task);
-        if (now == displayId) return;
-        XposedBridge.log(TAG + " mirage reclaim display" + displayId + " (task" + taskId
-                + " now on display" + now + ")");
-        sMirageTaskId = taskId;
-        releaseMirage();
-    }
-
-    private static int taskDisplayId(Object task) {
-        if (task == null) return -1;
-        Object value = callNoArg(task, "getDisplayId");
-        if (value instanceof Integer) return ((Integer) value).intValue();
-        return fieldInt(task, "mDisplayId");
-    }
-
-    /** 坞窗还原时由 MainHook 调进来：把还在幻影屏上的任务收干净。 */
-    static void onFloatRestored(int taskId) {
-        if (sMirageTasks.containsKey(taskId)) {
-            sMirageTaskId = taskId;
-            releaseMirage();
-        }
-    }
-
-    /**
-     * 建屏参数。宽高/密度不填会建成 0 尺寸的屏（adjustDisplayInfoIfNeeded 全部读 bundle），
-     * 所以从主屏抄一份填进去。注意 dislaywidth 是原厂拼写，少一个 p，别改。
-     */
-    private static Bundle mirageOptions(String pkg) {
-        Bundle bundle = new Bundle();
-        bundle.putInt("mirage:castmode", MIRAGE_CAST_MODE_BACKGROUND);
-        bundle.putBoolean("mirage:movetofront", true);
-        bundle.putString("mirage:packageName", pkg);
-        try {
-            Class<?> dmClass = XposedHelpers.findClass(
-                    "android.hardware.display.DisplayManagerGlobal", sClassLoader);
-            Object dm = XposedHelpers.callStaticMethod(dmClass, "getInstance");
-            Object info = XposedHelpers.callMethod(dm, "getDisplayInfo", 0);
-            int width = fieldInt(info, "logicalWidth");
-            int height = fieldInt(info, "logicalHeight");
-            int density = fieldInt(info, "logicalDensityDpi");
-            Object xdpi = readField(info, "physicalXDpi");
-            Object ydpi = readField(info, "physicalYDpi");
-            if (width > 0) bundle.putInt("mirage:dislaywidth", width);
-            if (height > 0) bundle.putInt("mirage:displayheight", height);
-            if (density > 0) bundle.putInt("mirage:densitydpi", density);
-            if (xdpi instanceof Float) bundle.putFloat("mirage:xdpi", ((Float) xdpi).floatValue());
-            if (ydpi instanceof Float) bundle.putFloat("mirage:ydpi", ((Float) ydpi).floatValue());
-            XposedBridge.log(TAG + " mirage options " + width + "x" + height + "@" + density);
-        } catch (Throwable t) {
-            XposedBridge.log(TAG + " mirage options failed: " + t.getMessage());
-        }
-        return bundle;
-    }
-
-    /** 任务标记：息屏继续跑、别把虚拟屏上的隐藏当成掉后台。 */
+    /** 任务标记：息屏继续跑、别把隐藏当成掉后台。缺哪个方法就跳过。 */
     private static void markTaskLively(Object task) {
         if (task == null) return;
         Object ext = task;
@@ -516,55 +273,13 @@ final class FloatKeepAliveHook {
         return args.length > 1 ? args[1] : null;
     }
 
-    private static void scheduleMirageRelease() {
-        Handler handler = sHandler;
-        if (handler == null) return;
-        handler.postDelayed(new Runnable() {
-            @Override
-            public void run() {
-                releaseMirage();
-            }
-        }, MIRAGE_RELEASE_DELAY_MS);
-    }
-
-    /** 释放幻影屏：系统会把任务搬回主屏，之后照旧走 mini 保活。 */
-    private static void releaseMirage() {
-        int taskId = sMirageTaskId;
-        Integer displayId = taskId < 0 ? null : sMirageTasks.get(taskId);
-        if (displayId == null) {
-            clearMirage();
-            return;
-        }
-        try {
-            Class<?> managerClass = XposedHelpers.findClass(MIRAGE_DISPLAY_CLASS, sClassLoader);
-            Object manager = XposedHelpers.callStaticMethod(managerClass, "getInstance");
-            if (manager != null) {
-                XposedHelpers.callMethod(manager, "releaseVirtualDisplayDevice", displayId.intValue());
-            }
-            XposedBridge.log(TAG + " mirage release display" + displayId + " (task" + taskId + ")");
-        } catch (Throwable t) {
-            XposedBridge.log(TAG + " mirage release failed: " + t.getMessage());
-        }
-        clearMirage();
-    }
-
-    private static void clearMirage() {
-        sMirageTasks.clear();
-        sMirageTaskRefs.clear();
-        sMirageTaskId = -1;
-        sMirageKeepFloatUntil = 0L;
-    }
-
-    private static boolean isMirageTask(Object task) {
-        int taskId = taskIdOfObject(task);
-        return taskId >= 0 && sMirageTasks.containsKey(taskId);
-    }
-
-    private static ComponentName topActivityOf(Object task) {
-        if (task == null) return null;
-        Object info = callNoArg(task, "getTaskInfo");
-        Object top = readField(info, "topActivity");
-        return top instanceof ComponentName ? (ComponentName) top : null;
+    /** 挂机分流用：引擎能认出来才算游戏，普通应用照旧走 mini 保活。 */
+    static boolean isGamePackage(Intent intent) {
+        if (intent == null) return false;
+        ComponentName component = intent.getComponent();
+        if (component == null) return false;
+        return !ENGINE_NONE.equals(
+                engineOfPackage(component.getPackageName(), component.getClassName()));
     }
 
     /** 引擎判定：先看 so，读不到再看顶层 Activity 前缀；都没有算普通应用。 */
@@ -572,6 +287,7 @@ final class FloatKeepAliveHook {
         String cached = sEngineCache.get(pkg);
         if (cached != null) return cached;
         String engine = ENGINE_NONE;
+        boolean confident = false;
         try {
             Object app = XposedHelpers.callStaticMethod(
                     XposedHelpers.findClass("android.app.AppGlobals", sClassLoader), "getInitialApplication");
@@ -579,35 +295,20 @@ final class FloatKeepAliveHook {
                 Object pm = XposedHelpers.callMethod(app, "getPackageManager");
                 Object appInfo = XposedHelpers.callMethod(pm, "getApplicationInfo", pkg, 0);
                 Object lib = readField(appInfo, "nativeLibraryDir");
-                if (lib instanceof String) engine = engineFromLib((String) lib);
+                if (lib instanceof String) {
+                    engine = engineFromLib((String) lib);
+                    confident = true;
+                }
             }
         } catch (Throwable ignored) {
         }
-        if (ENGINE_NONE.equals(engine)) engine = engineFromClass(topClass);
-        sEngineCache.put(pkg, engine);
+        if (ENGINE_NONE.equals(engine)) {
+            engine = engineFromClass(topClass);
+            confident = true;
+        }
+        // 只有拿到确定结论才缓存：查询失败一次就把游戏永久记成普通应用是最坏的结果
+        if (confident) sEngineCache.put(pkg, engine);
         return engine;
-    }
-
-    /**
-     * 冻结落刀点上的判定：只拦已经认出引擎的包，其它进程一概不动。
-     * 进程名可能是 com.tencent.nrc:xxx，取冒号前那段当包名。
-     */
-    private static boolean isEngineProcess(Object host, int pid) {
-        if (host == null || pid <= 0) return false;
-        Object list = readField(host, "mProcFrzStateRecList");
-        Object app = list instanceof SparseArray ? ((SparseArray<?>) list).get(pid) : null;
-        Object name = readField(app, "processName");
-        if (!(name instanceof String)) return false;
-        String processName = (String) name;
-        int colon = processName.indexOf(':');
-        String pkg = colon > 0 ? processName.substring(0, colon) : processName;
-        if (ENGINE_NONE.equals(sEngineCache.get(pkg))) return false;
-        XposedBridge.log(TAG + " skip hans freeze " + processName);
-        return true;
-    }
-
-    private static int fieldInt(Object instance, String name) {        Object value = readField(instance, name);
-        return value instanceof Integer ? ((Integer) value).intValue() : -1;
     }
 
     private static void callQuietly(Object target, String method, Object... args) {
@@ -617,6 +318,8 @@ final class FloatKeepAliveHook {
         } catch (Throwable ignored) {
         }
     }
+
+
 
     // ==================== ActivityRecord 上的保护 ====================
 
@@ -1661,9 +1364,9 @@ final class FloatKeepAliveHook {
         try {
             if (Boolean.TRUE.equals(readField(record, "finishing"))) return false;
             int taskId = taskIdOf(record);
-            // 已经搬到幻影屏的任务由 mirage 那套自己管，这里让路，
+            // 已经进幻影屏的任务由 MirageWindowHook 自己管，这里让路，
             // 否则两边同时改状态会把任务又拉回主屏。
-            if (sMirageTasks.containsKey(taskId)) return false;
+            if (MirageWindowHook.isHangUp(taskId)) return false;
             if (!isFloating(taskId)) return false;
             WeakReference<Object> ref = sTracked.get(taskId);
             if (ref == null || ref.get() != record) {

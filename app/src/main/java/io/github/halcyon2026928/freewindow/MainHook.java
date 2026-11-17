@@ -517,12 +517,12 @@ public class MainHook implements IXposedHookLoadPackage {
             XposedBridge.log(TAG + " hook FlexibleTaskCaptionView failed: " + t.getMessage());
         }
 
-        // 第六层：游戏助手 HangUpUtil 后台挂机（最小化进悬浮球后音频继续）
-        // try {
-        //     MirageWindowHook.hook(lpparam.classLoader);
-        // } catch (Throwable t) {
-        //     XposedBridge.log(TAG + " MirageWindowHook failed: " + t.getMessage());
-        // }
+        // 第六层：游戏贴边接到官方后台串流（mirage 幻影屏），普通应用仍走 mini 保活
+        try {
+            MirageWindowHook.hook(lpparam.classLoader);
+        } catch (Throwable t) {
+            XposedBridge.log(TAG + " MirageWindowHook failed: " + t.getMessage());
+        }
     }
 
     /**
@@ -1618,10 +1618,6 @@ public class MainHook implements IXposedHookLoadPackage {
             if (taskId > 0) MirageWindowHook.clearHangUp(taskId);
         } catch (Throwable ignored) {
         }
-        try {
-            if (taskId > 0) FloatKeepAliveHook.onFloatRestored(taskId);
-        } catch (Throwable ignored) {
-        }
 
         // 先收起坞窗、恢复悬浮球；官方恢复成功后悬浮球会由系统重新隐藏。
         removeFloatDock();
@@ -2172,6 +2168,14 @@ public class MainHook implements IXposedHookLoadPackage {
     /** 清除单个应用：用官方 removeFloatHandle 移除悬浮球 + 杀进程。 */
     private void removeSingleApp(String pkgName, int userId, int taskId, Object floatHandleInfo, ClassLoader cl) {
         try {
+            // 挂机中的游戏要先清掉挂机态：否则 MirageWindowHook 的 keep-float 拦截会把这次
+            // removeFloatHandle 吃掉（isHangUp 还是 true），悬浮球删不掉、进程要再点一次才退出。
+            if (taskId > 0) {
+                try {
+                    MirageWindowHook.clearHangUp(taskId);
+                } catch (Throwable ignored) {
+                }
+            }
             // 官方逻辑：removeFloatHandle(int taskId, null, true, 5)
             Object fhc = XposedHelpers.callStaticMethod(
                     XposedHelpers.findClass("com.android.server.wm.FloatHandleController", cl), "getInstance");
