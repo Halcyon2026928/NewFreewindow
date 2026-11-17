@@ -40,6 +40,8 @@ final class MirageWindowHook {
 
     private static final String FLEXIBLE_DCS_CLASS = "com.android.server.wm.OplusFlexibleDCSManager";
     private static final String MIRAGE_WMS_CLASS = "com.android.server.wm.OplusMirageWindowManagerService";
+    private static final String MIRAGE_STATE_MONITOR_CLASS = "com.android.server.wm.OplusMirageWindowStateMonitor";
+    private static final String FLEXIBLE_CONTROLLER_CLASS = "com.android.server.wm.FlexibleTaskController";
     private static final String FLOAT_CONTROLLER_CLASS = "com.android.server.wm.FloatHandleController";
     private static final String MIRAGE_DISPLAY_CLASS =
             "com.android.server.display.OplusMirageDisplayManagerService";
@@ -61,15 +63,23 @@ final class MirageWindowHook {
     /** 同一任务在该窗口内的重复最小化回调直接忽略。 */
     private static final long MINIMIZE_DEDUPE_MS = 3000L;
     /** 贴边后立刻建屏：拉起交给系统内部的 exitZoomWindowToBackIfNeeded，不会再被转场收回。 */
-    private static final long MIRAGE_START_DELAY_MS = 400L;
+    private static final long MIRAGE_START_DELAY_MS = 0L;
     /** 建屏后立刻补一次顶层恢复，缩短声音中断的空档。 */
-    private static final long MIRAGE_RESUME_DELAY_MS = 300L;
+    private static final long MIRAGE_RESUME_DELAY_MS = 0L;
     /** 恢复后等宿主收尾，确认它没释放才由我们兜底释放虚拟屏。 */
     private static final long RESTORE_RELEASE_DELAY_MS = 1200L;
     /** 挂起任务消失后的巡检间隔，只在有挂起任务时才会排队。 */
     private static final long REAP_INTERVAL_MS = 5000L;
     /** 模块加载后先等系统就绪，再扫一遍无人使用的后台串流屏。 */
     private static final long ORPHAN_SWEEP_DELAY_MS = 3000L;
+    /** 系统为进屏主动退出小窗时，这段窗口内放行 moveTaskToBack（转场约几百毫秒，留足余量）。 */
+    private static final long ALLOW_MOVE_BACK_MS = 2000L;
+
+    private static volatile long sAllowMoveBackUntil = 0L;
+    /** delayedRunUntilExitFlexibleMode 里被推迟的 startActivity runnable，按任务暂存。 */
+    private static final java.util.Map<Integer, Runnable> sDeferredStart = new java.util.concurrent.ConcurrentHashMap<>();
+    /** 已提前执行过的 runnable 的 identity 值，5 秒兜底再跑时拦掉。 */
+    private static final java.util.Set<Integer> sRanStarts = java.util.concurrent.ConcurrentHashMap.newKeySet();
 
     /** 任务上的保活标记：各机型只实现其中几个，逐个尝试。 */
     private static final String[] LIVELY_FLAGS = {
@@ -99,6 +109,8 @@ final class MirageWindowHook {
         sMain = new Handler(Looper.getMainLooper());
         hookMinimize();
         hookMoveTaskToBack();
+        hookFlexibleExit();
+        hookFlexibleExitDone();
         hookKeepFloatHandle();
         hookReleaseOnRestore();
         hookSelfHeal();
@@ -317,6 +329,98 @@ final class MirageWindowHook {
 
     // ==================== 挂起期间的拦阻 ====================
 
+    /**
+     * 系统为把任务接到幻影屏，会先主动把任务退出小窗（ExitFlexibleTaskToBackStrategy），
+     * 转场结束后 onFlexibleTaskTransitionEnd 立刻 startActivity；转场收不了尾就只能等 5 秒兜底。
+     * 这次退后台必须放行，否则就是我们自己把进屏时间拖成 5 秒。
+     *
+     * 同时把系统推迟的 startActivity runnable 暂存起来，一拿到就立刻替系统执行（此时屏已 ready、
+     * 游戏还没被暂停，声音不断）。5 秒兜底里再跑的那次用 identity 去重拦掉。
+     */
+    private static void hookFlexibleExit() {
+        try {
+            Class<?> monitor = XposedHelpers.findClass(MIRAGE_STATE_MONITOR_CLASS, sClassLoader);
+            XposedBridge.hookAllMethods(monitor, "delayedRunUntilExitFlexibleMode", new XC_MethodHook() {
+                @Override
+                protected void beforeHookedMethod(MethodHookParam param) {
+                    sAllowMoveBackUntil = SystemClock.uptimeMillis() + ALLOW_MOVE_BACK_MS;
+                    Object task = param.args.length > 0 ? param.args[0] : null;
+                    Object runnable = param.args.length > 1 ? param.args[1] : null;
+                    int taskId = taskIdOf(task);
+                    if (taskId >= 0 && runnable instanceof Runnable) {
+                        sDeferredStart.put(taskId, (Runnable) runnable);
+                        XposedBridge.log(TAG + " defer mirage start taskId=" + taskId);
+                    }
+                    XposedBridge.log(TAG + " allow moveTaskToBack for mirage entry");
+                }
+            });
+            // 5 秒兜底跑同一个 runnable 时，已由我们提前执行过的那次拦掉，避免重复拉起。
+            XposedBridge.hookAllMethods(
+                    XposedHelpers.findClass(MIRAGE_STATE_MONITOR_CLASS + "$MirageMonitorRunnable", sClassLoader),
+                    "run", new XC_MethodHook() {
+                        @Override
+                        protected void beforeHookedMethod(MethodHookParam param) {
+                            Object inner = XposedHelpers.getObjectField(param.thisObject, "mRunnable");
+                            if (inner != null && sRanStarts.contains(System.identityHashCode(inner))) {
+                                XposedBridge.log(TAG + " skip duplicated mirage start");
+                                param.setResult(null);
+                            }
+                        }
+                    });
+            XposedBridge.log(TAG + " hooked flexible exit");
+        } catch (Throwable t) {
+            XposedBridge.log(TAG + " hookFlexibleExit failed: " + t);
+        }
+    }
+
+    /**
+     * 执行被推迟的幻影屏拉起 runnable：每个 runnable 只执行一次（identity 去重），
+     * 执行统一 post 到主线程、脱离 WM 锁。
+     */
+    private static void fireDeferredStart(int taskId, final Runnable runnable, long delayMs) {
+        if (!sRanStarts.add(System.identityHashCode(runnable))) {
+            XposedBridge.log(TAG + " mirage start already fired, skip taskId=" + taskId);
+            return;
+        }
+        XposedBridge.log(TAG + " fire deferred mirage start taskId=" + taskId + " delay=" + delayMs);
+        Handler handler = sMain;
+        if (handler == null) return;
+        handler.postDelayed(new Runnable() {
+            @Override
+            public void run() {
+                try {
+                    runnable.run();
+                } catch (Throwable t) {
+                    XposedBridge.log(TAG + " deferred mirage start failed: " + t);
+                }
+            }
+        }, delayMs);
+    }
+
+    /** 任务真正退出小窗（exitFlexibleTask 返回）后立刻拉起，作为「一拿到就执行」失败时的兜底时机。 */
+    private static void hookFlexibleExitDone() {
+        try {
+            Class<?> controller = XposedHelpers.findClass(FLEXIBLE_CONTROLLER_CLASS, sClassLoader);
+            XposedBridge.hookAllMethods(controller, "exitFlexibleTask", new XC_MethodHook() {
+                @Override
+                protected void afterHookedMethod(MethodHookParam param) {
+                    try {
+                        Object task = findTask(param.args);
+                        int taskId = taskIdOf(task);
+                        final Runnable runnable = sDeferredStart.get(taskId);
+                        if (runnable == null) return;
+                        fireDeferredStart(taskId, runnable, 0L);
+                    } catch (Throwable t) {
+                        XposedBridge.log(TAG + " exit flexible done failed: " + t);
+                    }
+                }
+            });
+            XposedBridge.log(TAG + " hooked exitFlexibleTask");
+        } catch (Throwable t) {
+            XposedBridge.log(TAG + " hookFlexibleExitDone failed: " + t);
+        }
+    }
+
     private static void hookMoveTaskToBack() {
         try {
             Class<?> mws = XposedHelpers.findClass(MIRAGE_WMS_CLASS, sClassLoader);
@@ -326,6 +430,10 @@ final class MirageWindowHook {
                     Object task = param.args.length > 0 ? param.args[0] : null;
                     int taskId = taskIdOf(task);
                     if (!isHangUp(taskId)) return;
+                    if (SystemClock.uptimeMillis() <= sAllowMoveBackUntil) {
+                        XposedBridge.log(TAG + " pass moveTaskToBack taskId=" + taskId + " (mirage entry)");
+                        return;
+                    }
                     XposedBridge.log(TAG + " block moveTaskToBack taskId=" + taskId);
                     param.setResult(null);
                 }
