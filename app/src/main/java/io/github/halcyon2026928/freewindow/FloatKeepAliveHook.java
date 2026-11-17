@@ -86,6 +86,13 @@ final class FloatKeepAliveHook {
 
     /** 引擎判定的「认不出来」结果，此时维持原来的 mini 保活。 */
     private static final String ENGINE_NONE = "none";
+
+    /** 3.2 那套任务标记（缺哪个方法就跳过，两台机的 TaskExtImpl 不完全一样）。 */
+    private static final String[] LIVELY_FLAGS = {
+            "setLively", "setSceenOffPlay", "setIgnoreHiddenFlag",
+            "setMaintainTaskState", "setSkipMoveTaskToBack",
+            "dontPauseAfterQActivityIfNeed"
+    };
     /** 建屏要 400ms 左右，等贴边动画走完再搬，避免两套动画打架。 */
     private static final long MIRAGE_START_DELAY_MS = 400L;
     /** 恢复时等原生搬回主屏，再释放虚拟屏。 */
@@ -255,8 +262,16 @@ final class FloatKeepAliveHook {
         if (dcs != null) {
             ok |= hookAllSafe(dcs, "startMinimize", new XC_MethodHook() {
                 @Override
+                protected void beforeHookedMethod(MethodHookParam param) {
+                    // 3.2 的做法：贴边前就先把任务标记成「继续跑」，不分游戏还是应用
+                    markTaskLively(taskArg(param));
+                }
+
+                @Override
                 protected void afterHookedMethod(MethodHookParam param) {
-                    queueMirage(param.args.length > 1 ? param.args[1] : null);
+                    Object task = taskArg(param);
+                    markTaskLively(task);
+                    queueMirage(task);
                 }
             });
         }
@@ -472,15 +487,33 @@ final class FloatKeepAliveHook {
     /** 任务标记：息屏继续跑、别把虚拟屏上的隐藏当成掉后台。 */
     private static void markTaskLively(Object task) {
         if (task == null) return;
-        Object ext;
+        Object ext = task;
         try {
-            ext = XposedHelpers.callMethod(task, "getExtImpl");
-        } catch (Throwable t) {
-            ext = task;
+            Object wrapper = XposedHelpers.callMethod(task, "getWrapper");
+            ext = XposedHelpers.callMethod(wrapper, "getExtImpl");
+        } catch (Throwable ignored) {
+            try {
+                ext = XposedHelpers.callMethod(task, "getExtImpl");
+            } catch (Throwable alsoIgnored) {
+                ext = task;
+            }
         }
-        callQuietly(ext, "setSceenOffPlay", true);
-        callQuietly(ext, "setLively", true);
+        for (String name : LIVELY_FLAGS) {
+            callQuietly(ext, name, true);
+        }
+        // 这个是 int 形参（1 = 不敏感），不能跟着上面按 boolean 一起传。
         callQuietly(ext, "setInsensibleFlag", 1);
+    }
+
+    private static Object taskArg(XC_MethodHook.MethodHookParam param) {
+        Object[] args = param.args;
+        if (args == null) return null;
+        for (Object arg : args) {
+            if (arg != null && "com.android.server.wm.Task".equals(arg.getClass().getName())) {
+                return arg;
+            }
+        }
+        return args.length > 1 ? args[1] : null;
     }
 
     private static void scheduleMirageRelease() {
