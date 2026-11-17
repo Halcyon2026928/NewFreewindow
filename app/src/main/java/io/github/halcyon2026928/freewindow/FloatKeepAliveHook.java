@@ -8,6 +8,7 @@ import android.os.IBinder;
 import android.os.Looper;
 import android.os.SystemClock;
 
+import java.io.File;
 import java.lang.ref.WeakReference;
 import java.lang.reflect.Constructor;
 import java.lang.reflect.Field;
@@ -126,6 +127,26 @@ final class FloatKeepAliveHook {
     private static final AtomicBoolean sSweepScheduled = new AtomicBoolean(false);
     private static final java.util.concurrent.ExecutorService sExemptExec =
             Executors.newSingleThreadExecutor();
+
+    /** 包名 -> 引擎判定结果（ue/unity/cocos/ejoy/none），只算一次。 */
+    private static final ConcurrentHashMap<String, String> sEngineCache = new ConcurrentHashMap<>();
+
+    /**
+     * 引擎 native so 特征。
+     *
+     * 取自动手实测：洛克王国=libUE4.so、全民农场=libcocos2dcpp.so、三国志=libejoysdk_*，
+     * 而抖音这类非游戏一个引擎 so 都没有。腾讯的 libgcloud/libMSDK 不算判据——普通
+     * 腾讯应用也带。
+     */
+    private static final String[] SO_UNREAL = {"libUE4.so", "libUE5.so"};
+    private static final String[] SO_UNITY = {"libunity.so"};
+    private static final String[] SO_COCOS = {"libcocos2dcpp.so", "libcocos2djs.so", "libcocos.so"};
+    private static final String[] SO_EJOY = {"libejoysdk_bundle_vm.so", "libejoysdk_inside_vm.so"};
+
+    /** so 目录列不出来时的兜底：贴边那一刻真实顶层 Activity 的类名前缀。 */
+    private static final String[] GAME_ACTIVITY_PREFIXES = {
+            "com.epicgames.ue4.", "com.ejoy2dx.", "com.unity3d.player.", "org.cocos2dx."
+    };
 
     private static Handler sHandler;
 
@@ -944,9 +965,19 @@ final class FloatKeepAliveHook {
             scheduleExemptSweep();
             return;
         }
+        // 贴边这一刻的真实顶层 Activity 与 native so 目录，用来判定「这算不算游戏」
+        Object info = readField(record, "info");
+        Object appInfo = readField(info, "applicationInfo");
+        Object classObj = readField(info, "name");
+        final String topClass = classObj instanceof String ? (String) classObj : null;
+        Object libObj = readField(appInfo, "nativeLibraryDir");
+        final String libDir = libObj instanceof String ? (String) libObj : null;
+        Object catObj = readField(appInfo, "category");
+        final int category = catObj instanceof Integer ? ((Integer) catObj).intValue() : 0;
         sExemptExec.execute(new Runnable() {
             @Override
             public void run() {
+                probeGame(pkg, topClass, libDir, category);
                 try {
                     boolean ok = deviceIdleCall("addPowerSaveWhitelistApp", pkg);
                     XposedBridge.log(TAG + (ok ? " exempt " : " exempt failed ") + pkg);
@@ -977,6 +1008,69 @@ final class FloatKeepAliveHook {
                 });
             }
         }, EXEMPT_SWEEP_MS);
+    }
+
+    /**
+     * 判定「这个包算不算游戏」，只打日志，不影响任何行为。
+     *
+     * 判据来自设备实测，不用 ColorOS 那套游戏识别（`GameManagerServiceExtImpl.isGamePkg`
+     * 是云端包名表，且实测在 5200 上根本没被调用），也不用 `ApplicationInfo.category`
+     * ——三家游戏实测都是 0（不是 CATEGORY_GAME）。真正稳定的是引擎 so：
+     * 洛克王国 libUE4.so、全民农场 libcocos2dcpp.so、三国志 libejoysdk_*，
+     * 而非游戏的抖音一个引擎 so 都没有。
+     */
+    private static void probeGame(String pkg, String topClass, String libDir, int category) {
+        String engine = sEngineCache.get(pkg);
+        if (engine == null) {
+            engine = engineFromLib(libDir);
+            if ("none".equals(engine)) engine = engineFromClass(topClass);
+            // so 目录拿不到时先不缓存，下次贴边重新判，避免一次失败永久记成非游戏
+            if (libDir != null) sEngineCache.put(pkg, engine);
+        }
+        XposedBridge.log(TAG + " probe " + pkg
+                + " top=" + (topClass == null ? "-" : topClass)
+                + " cat=" + category
+                + " engine=" + engine
+                + " => " + ("none".equals(engine) ? "APP" : "GAME"));
+    }
+
+    /** 引擎 so 判定：返回 ue / unity / cocos / ejoy，都没有则 none。 */
+    private static String engineFromLib(String libDir) {
+        String[] names;
+        try {
+            names = libDir == null || libDir.isEmpty() ? null : new File(libDir).list();
+        } catch (Throwable t) {
+            names = null;
+        }
+        if (names == null) return "none";
+        for (String name : names) {
+            if (contains(SO_UNREAL, name)) return "ue";
+            if (contains(SO_UNITY, name)) return "unity";
+            if (contains(SO_COCOS, name)) return "cocos";
+            if (contains(SO_EJOY, name)) return "ejoy";
+        }
+        return "none";
+    }
+
+    /** so 目录列不出来时的兜底：引擎 Activity 类名前缀。 */
+    private static String engineFromClass(String topClass) {
+        if (topClass == null) return "none";
+        if (topClass.startsWith("com.epicgames.ue4.")) return "ue";
+        if (topClass.startsWith("com.ejoy2dx.")) return "ejoy";
+        if (topClass.startsWith("com.unity3d.player.")) return "unity";
+        if (topClass.startsWith("org.cocos2dx.")) return "cocos";
+        for (String prefix : GAME_ACTIVITY_PREFIXES) {
+            if (topClass.startsWith(prefix)) return "engine";
+        }
+        return "none";
+    }
+
+    private static boolean contains(String[] pool, String value) {
+        if (value == null) return false;
+        for (String item : pool) {
+            if (item.equals(value)) return true;
+        }
+        return false;
     }
 
     private static void sweepExemptions() {
