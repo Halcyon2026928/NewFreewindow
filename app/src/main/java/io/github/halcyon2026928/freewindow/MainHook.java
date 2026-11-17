@@ -72,6 +72,9 @@ public class MainHook implements IXposedHookLoadPackage {
     private static Object sCurrentFloatHandleView;
     /** 悬浮球所在线程（android.ui）的 Handler，点击那一刻抓取，恢复后用它解除 sRestoring。 */
     private static Handler sHandleHandler;
+    /** 上一次画到悬浮球上的应用（记忆）：恢复某个应用后列表清空时用它把图标补回去。 */
+    private static String sLastHandlePkg;
+    private static int sLastHandleUserId;
     /** 坞窗容器（全局唯一）。 */
     private static FrameLayout sDockContainer;
     /** 坞窗外面那层全屏透明遮罩：专门吃掉「点坞窗外」那一下，避免穿透到桌面图标。 */
@@ -963,37 +966,201 @@ public class MainHook implements IXposedHookLoadPackage {
                         }
                     }
                 });
-                // 兜底：不是走 add 的情况（批量 set / 重排）也可能留下多个图标，
-                // updateIconStyle 结束时再看一眼适配器，多于一个就只留最新的那个。
-                XposedBridge.hookAllMethods(fhvClass, "updateIconStyle", new XC_MethodHook() {
-                    @Override
-                    protected void afterHookedMethod(MethodHookParam param) {
-                        try {
-                            Object adapter = XposedHelpers.getObjectField(
-                                    param.thisObject, "mIconListAdapter");
-                            if (adapter == null) return;
-                            Object listObj = XposedHelpers.getObjectField(
-                                    adapter, "mFloatIconViewInfoList");
-                            if (!(listObj instanceof List)) return;
-                            List icons = (List) listObj;
-                            if (icons.size() <= 1) return;
-                            Object keep = icons.get(0);
-                            ArrayList one = new ArrayList();
-                            one.add(keep);
-                            XposedHelpers.callMethod(adapter, "setFloatIconViewInfoList", one);
-                            XposedHelpers.callMethod(adapter, "notifyDataSetChanged");
-                            XposedBridge.log(TAG + " single-icon trim: " + icons.size() + " -> 1");
-                        } catch (Throwable t) {
-                            XposedBridge.log(TAG + " single-icon trim error: " + t.getMessage());
+                // 图标记忆（5200 走适配器）：恢复某个应用时系统把它的图标摘掉，列表被摘空后
+                // 悬浮球就只剩一个空球。这里在 updateIconStyle 结束后兜一层：
+                // 多于一个就只留最新那个；一个都没有就用控制器里仍挂着的应用重建图标。
+                if (XposedHelpers.findFieldIfExists(fhvClass, "mIconListAdapter") != null) {
+                    XposedBridge.hookAllMethods(fhvClass, "updateIconStyle", new XC_MethodHook() {
+                        @Override
+                        protected void afterHookedMethod(MethodHookParam param) {
+                            try {
+                                Object view = param.thisObject;
+                                Object adapter = XposedHelpers.getObjectField(view, "mIconListAdapter");
+                                if (adapter == null) return;
+                                Object listObj = XposedHelpers.getObjectField(
+                                        adapter, "mFloatIconViewInfoList");
+                                if (!(listObj instanceof List)) return;
+                                List icons = (List) listObj;
+                                if (icons.size() > 1) {
+                                    ArrayList one = new ArrayList();
+                                    one.add(icons.get(0));
+                                    XposedHelpers.callMethod(adapter, "setFloatIconViewInfoList", one);
+                                    XposedHelpers.callMethod(adapter, "notifyDataSetChanged");
+                                    XposedBridge.log(TAG + " single-icon trim: " + icons.size() + " -> 1");
+                                    return;
+                                }
+                                if (icons.isEmpty()) {
+                                    refillFloatIcon(view, cl);
+                                }
+                            } catch (Throwable t) {
+                                XposedBridge.log(TAG + " adapter icon memory error: " + t.getMessage());
+                            }
                         }
-                    }
-                });
+                    });
+                }
                 XposedBridge.log(TAG + " FloatIconListAdapter single-icon hooks success");
             } catch (Throwable t) {
                 XposedBridge.log(TAG + " FloatIconListAdapter hook skipped: " + t.getMessage());
             }
+
+            // 图标记忆（3820 走这里）：updateIconStyle 只会画 size==1 的 get(0) 和 size==2 的
+            // get(1)/get(0)，列表一空两个图标都隐藏，出现「悬浮球在、图标没了」。
+            // 这里在重绘结束后兜一层：有应用就画最新的那个，没有就画上一次记住的那个。
+            if (XposedHelpers.findFieldIfExists(fhvClass, "mIconViewFir") != null) {
+                try {
+                    XposedBridge.hookAllMethods(fhvClass, "updateIconStyle", new XC_MethodHook() {
+                        @Override
+                        protected void afterHookedMethod(MethodHookParam param) {
+                            try {
+                                Object view = param.thisObject;
+                                Object iconObj = XposedHelpers.getObjectField(view, "mIconViewFir");
+                                if (!(iconObj instanceof ImageView)) return;
+                                ImageView fir = (ImageView) iconObj;
+                                if (fir.getVisibility() == View.VISIBLE
+                                        && fir.getDrawable() != null) {
+                                    rememberHandleApp(view, cl);
+                                    return;
+                                }
+                                paintHandleIcon(view, fir, cl);
+                            } catch (Throwable t) {
+                                XposedBridge.log(TAG + " icon memory error: " + t.getMessage());
+                            }
+                        }
+                    });
+                    XposedBridge.log(TAG + " FloatHandleView icon-memory hook success");
+                } catch (Throwable t) {
+                    XposedBridge.log(TAG + " icon-memory hook skipped: " + t.getMessage());
+                }
+            }
         } catch (Throwable t) {
             XposedBridge.log(TAG + " hookFloatHandleClick failed: " + t.getMessage());
+        }
+    }
+
+    /** 记住当前画在悬浮球上的应用，供列表清空后的补画使用。 */
+    private static void rememberHandleApp(Object view, ClassLoader cl) {
+        try {
+            Object listObj = XposedHelpers.callMethod(view, "getFloatHandleInfoList");
+            if (!(listObj instanceof List) || ((List) listObj).isEmpty()) return;
+            List list = (List) listObj;
+            Object info = list.get(list.size() - 1);
+            if (info == null) return;
+            sLastHandlePkg = (String) XposedHelpers.callMethod(info, "getPackageName");
+            sLastHandleUserId = (int) XposedHelpers.callMethod(info, "getUserId");
+        } catch (Throwable ignored) {
+        }
+    }
+
+    /** 从控制器真实列表里挑一个应用记进记忆（excludeTaskId 是刚被恢复/移除的那个）。 */
+    private static void rememberOtherHandleApp(ClassLoader cl, int excludeTaskId) {
+        try {
+            Object fhc = XposedHelpers.callStaticMethod(
+                    XposedHelpers.findClass("com.android.server.wm.FloatHandleController", cl),
+                    "getInstance");
+            Object raw = XposedHelpers.callMethod(fhc, "getFloatHandleInfoList");
+            if (!(raw instanceof List) || ((List) raw).isEmpty()) return;
+            List list = (List) raw;
+            for (int i = list.size() - 1; i >= 0; i--) {
+                Object info = list.get(i);
+                if (info == null) continue;
+                int id = -1;
+                try {
+                    id = XposedHelpers.getIntField(info, "taskId");
+                } catch (Throwable ignored) {
+                }
+                if (id == excludeTaskId) continue;
+                sLastHandlePkg = (String) XposedHelpers.callMethod(info, "getPackageName");
+                sLastHandleUserId = (int) XposedHelpers.callMethod(info, "getUserId");
+                XposedBridge.log(TAG + " icon memory pick pkg=" + sLastHandlePkg + " exclude=" + excludeTaskId);
+                return;
+            }
+        } catch (Throwable ignored) {
+        }
+    }
+
+    /** 3820：主图标空了就补画，优先用控制器里最新挂着的应用，没有就用记忆的那个。 */
+    private static void paintHandleIcon(Object view, ImageView fir, ClassLoader cl) {
+        try {
+            Context ctx = (Context) XposedHelpers.callMethod(view, "getContext");
+            String pkg = null;
+            int userId = 0;
+            Object infosObj = XposedHelpers.callMethod(view, "getFloatHandleInfoList");
+            if (infosObj instanceof List && !((List) infosObj).isEmpty()) {
+                List infos = (List) infosObj;
+                Object info = infos.get(infos.size() - 1);
+                if (info != null) {
+                    pkg = (String) XposedHelpers.callMethod(info, "getPackageName");
+                    userId = (int) XposedHelpers.callMethod(info, "getUserId");
+                }
+            }
+            if (pkg == null) {
+                pkg = sLastHandlePkg;
+                userId = sLastHandleUserId;
+            }
+            if (pkg == null) return;
+            sLastHandlePkg = pkg;
+            sLastHandleUserId = userId;
+            Bitmap icon = (Bitmap) XposedHelpers.callStaticMethod(
+                    XposedHelpers.findClass("com.android.server.wm.FlexibleWindowUtils", cl),
+                    "getAdjustAppBitmap", ctx, pkg, userId);
+            if (icon == null) return;
+            fir.setImageBitmap(icon);
+            fir.setVisibility(View.VISIBLE);
+            XposedBridge.log(TAG + " icon memory repaint pkg=" + pkg);
+        } catch (Throwable t) {
+            XposedBridge.log(TAG + " icon memory error: " + t.getMessage());
+        }
+    }
+
+    /**
+     * 5200 适配器路径的图标补画：图标列表被摘空时，用控制器里仍挂着的应用重建一个图标。
+     * 控制器列表为空（真没有应用了）就保留上一次记忆的包名，仍然把图标画上。
+     */
+    private static void refillFloatIcon(Object view, ClassLoader cl) {
+        try {
+            Object adapter = XposedHelpers.getObjectField(view, "mIconListAdapter");
+            if (adapter == null) return;
+            Object listObj = XposedHelpers.getObjectField(adapter, "mFloatIconViewInfoList");
+            if (listObj instanceof List && !((List) listObj).isEmpty()) return;
+            Context ctx = (Context) XposedHelpers.callMethod(view, "getContext");
+            String pkg = null;
+            int userId = 0;
+            int handleId = -1;
+            Object infosObj = XposedHelpers.callMethod(view, "getFloatHandleInfoList");
+            if (infosObj instanceof List && !((List) infosObj).isEmpty()) {
+                List infos = (List) infosObj;
+                Object info = infos.get(infos.size() - 1);
+                if (info != null) {
+                    pkg = (String) XposedHelpers.callMethod(info, "getPackageName");
+                    userId = (int) XposedHelpers.callMethod(info, "getUserId");
+                    try {
+                        handleId = XposedHelpers.getIntField(info, "taskId");
+                    } catch (Throwable ignored) {
+                    }
+                }
+            }
+            if (pkg == null) {
+                pkg = sLastHandlePkg;
+                userId = sLastHandleUserId;
+            }
+            if (pkg == null) return;
+            sLastHandlePkg = pkg;
+            sLastHandleUserId = userId;
+            Bitmap bmp = (Bitmap) XposedHelpers.callStaticMethod(
+                    XposedHelpers.findClass("com.android.server.wm.FlexibleWindowUtils", cl),
+                    "getAdjustAppBitmap", ctx, pkg, userId);
+            if (bmp == null) return;
+            Object iconInfo = XposedHelpers.newInstance(
+                    XposedHelpers.findClass(
+                            "com.android.server.wm.floathandle.FloatHandleView$FloatIconViewInfo", cl),
+                    bmp, pkg, handleId);
+            ArrayList one = new ArrayList();
+            one.add(iconInfo);
+            XposedHelpers.callMethod(adapter, "setFloatIconViewInfoList", one);
+            XposedHelpers.callMethod(adapter, "notifyDataSetChanged");
+            XposedBridge.log(TAG + " adapter icon memory repaint pkg=" + pkg);
+        } catch (Throwable t) {
+            XposedBridge.log(TAG + " adapter icon memory error: " + t.getMessage());
         }
     }
 
@@ -1616,6 +1783,12 @@ public class MainHook implements IXposedHookLoadPackage {
         XposedBridge.log(TAG + " restoreFloatInfo taskId=" + taskId);
         try {
             if (taskId > 0) MirageWindowHook.clearHangUp(taskId);
+        } catch (Throwable ignored) {
+        }
+        // 恢复的这一刻先把「剩下的那个应用」记进图标记忆：系统把被恢复项的图标摘掉后
+        // 如果列表被摘空、没有触发重绘，补画就用它，不会画出刚恢复的那个应用。
+        try {
+            rememberOtherHandleApp(cl, taskId);
         } catch (Throwable ignored) {
         }
 
