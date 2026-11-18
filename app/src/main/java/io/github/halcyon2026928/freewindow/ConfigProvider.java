@@ -23,6 +23,8 @@ public class ConfigProvider extends ContentProvider {
     @Override
     public Cursor query(Uri uri, String[] projection, String selection,
                         String[] selectionArgs, String sortOrder) {
+        // 每次被 system_server 查询时顺手把 prefs 设成可读，保证 XSharedPreferences 兜底通道有效。
+        ModulePrefs.makePrefsReadable(getContext());
         SharedPreferences prefs = ModulePrefs.get(getContext());
         MatrixCursor c = new MatrixCursor(new String[]{"key", "value"});
         c.addRow(new Object[]{SettingsActivity.KEY_HIDE_BOTTOM_BAR,

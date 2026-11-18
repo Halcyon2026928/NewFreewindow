@@ -1,6 +1,7 @@
 package io.github.halcyon2026928.freewindow;
 
 import android.content.Context;
+import android.database.Cursor;
 import android.net.wifi.WifiInfo;
 import android.net.wifi.WifiManager;
 import android.os.Binder;
@@ -138,7 +139,7 @@ public final class WirelessAdbAuto {
                                 + " screen=" + screenState() + " by " + caller());
                         // 系统自己关掉（锁屏计时、省电策略、Wi-Fi 抖动回滚）→ 当场补开。
                         // 用户手动关的那条走 setAdbEnabled(false)，会先置 sUserDisabled，这里就不动了。
-                        if (value == 0 && !sUserDisabled && readEnabled()) {
+                        if (value == 0 && !sUserDisabled && isEnabledOrUnknown()) {
                             Context ctx = sKeepCtx;
                             if (ctx != null && isUserUnlocked(ctx) && hasWifiConnection(ctx)) {
                                 XposedBridge.log(TAG + " system closed wireless adb -> re-enable now");
@@ -300,7 +301,7 @@ public final class WirelessAdbAuto {
         Context ctx = sKeepCtx;
         if (ctx == null) return;
         try {
-            if (!readEnabled()) return;
+            if (!isEnabledOrUnknown()) return;
             if (sUserDisabled) return;
             int v = Settings.Global.getInt(ctx.getContentResolver(), GLOBAL_KEY, 0);
             if (v == 1) return;
@@ -339,7 +340,23 @@ public final class WirelessAdbAuto {
 
     private static void attempt(final Context ctx, final Handler handler, final int n) {
         if (sFinished) return;
-        if (!readEnabled()) {
+        Boolean enabled = readEnabled(ctx);
+        if (enabled == null) {
+            // 读不到（模块 app 还没被拉到、prefs 也还不可读）→ 继续等，别一锤定音放弃
+            if (n >= RETRY_LIMIT) {
+                XposedBridge.log(TAG + " give up: config still unreadable");
+                sFinished = true;
+                return;
+            }
+            handler.postDelayed(new Runnable() {
+                @Override
+                public void run() {
+                    attempt(ctx, handler, n + 1);
+                }
+            }, RETRY_MS);
+            return;
+        }
+        if (!enabled) {
             XposedBridge.log(TAG + " auto wireless adb is off, skip");
             sFinished = true;
             return;
@@ -420,15 +437,60 @@ public final class WirelessAdbAuto {
         }, VERIFY_MS);
     }
 
-    private static boolean readEnabled() {
+    /**
+     * 读「自动打开无线调试」开关。返回 null 表示**读不到**（既没拿到 provider 结果，
+     * prefs 也不可读），调用方应重试而不是当成关闭。
+     *
+     * <p>两条通道：
+     * <ol>
+     *   <li>ConfigProvider（模块 app 里的 ContentProvider，system_server 直接 query，
+     *       会顺带把模块进程拉起来；迁移到 modern API 102 后这条是主力通道）；</li>
+     *   <li>模块 prefs XML（模块 app 已把它设成 world-readable 时可用，作为兜底）。</li>
+     * </ol>
+     */
+    private static Boolean readEnabled(Context ctx) {
+        if (ctx != null) {
+            Cursor c = null;
+            try {
+                c = ctx.getContentResolver().query(ConfigProvider.CONFIG_URI, null, null, null, null);
+                if (c != null) {
+                    while (c.moveToNext()) {
+                        if (KEY.equals(c.getString(0))) {
+                            return c.getInt(1) == 1;
+                        }
+                    }
+                    // 查询成功但没有这个键：说明 provider 已就绪、键缺失 → 当作关闭
+                    return Boolean.FALSE;
+                }
+            } catch (Throwable t) {
+                XposedBridge.log(TAG + " read provider failed: " + t.getMessage());
+            } finally {
+                if (c != null) {
+                    try {
+                        c.close();
+                    } catch (Throwable ignored) {
+                    }
+                }
+            }
+        }
         try {
             XSharedPreferences prefs = new XSharedPreferences(ModulePrefs.PKG, ModulePrefs.NAME);
             prefs.reload();
+            if (!prefs.getFile().canRead()) {
+                XposedBridge.log(TAG + " prefs unreadable: " + prefs.getFile());
+                return null;
+            }
             return prefs.getBoolean(KEY, false);
         } catch (Throwable t) {
             XposedBridge.log(TAG + " read prefs failed: " + t.getMessage());
-            return false;
+            return null;
         }
+    }
+
+    /** 开关为「开」或暂时读不到时都算 true：读不到时宁可尝试补开，也不要误判成用户关掉了。 */
+    private static boolean isEnabledOrUnknown() {
+        Boolean enabled = readEnabled(sKeepCtx);
+        return enabled == null || enabled;
     }
 
     private static boolean isUserUnlocked(Context ctx) {
