@@ -931,6 +931,19 @@ public final class LivelyHook {
         return args;
     }
 
+    /** 按 taskId 找 Task（RootWindowContainer.anyTaskForId 有多个重载，逐个试）。 */
+    static Object taskById(ClassLoader cl, int taskId) {
+        Object atms = getAtms(cl);
+        if (atms == null) return null;
+        try {
+            Object rwc = XposedHelpers.getObjectField(atms, "mRootWindowContainer");
+            return invokeAny(rwc, "anyTaskForId", taskId);
+        } catch (Throwable t) {
+            log("taskById " + t);
+            return null;
+        }
+    }
+
     private static Object getAtms(ClassLoader cl) {
         try {
             Object fhc = XposedHelpers.callStaticMethod(

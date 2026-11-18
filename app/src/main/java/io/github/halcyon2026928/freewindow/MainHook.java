@@ -831,6 +831,7 @@ public class MainHook implements IXposedHookLoadPackage {
                             try {
                                 // 我们自己正在走官方恢复：放行，别再弹坞窗。
                                 if (sRestoring) {
+                                    param.setObjectExtra("fwRestorePass", Boolean.TRUE);
                                     XposedBridge.log(TAG + " restoring in progress, pass through official restore");
                                     return;
                                 }
@@ -841,6 +842,7 @@ public class MainHook implements IXposedHookLoadPackage {
                                 } catch (Throwable ignored) {
                                 }
                                 if (!enableDock) {
+                                    param.setObjectExtra("fwRestorePass", Boolean.TRUE);
                                     XposedBridge.log(TAG + " dock disabled, skip intercept");
                                     return;
                                 }
@@ -860,6 +862,29 @@ public class MainHook implements IXposedHookLoadPackage {
                                 showFloatDock(floatHandleView, floatHandleInfo, cl);
                             } catch (Throwable t) {
                                 XposedBridge.log(TAG + " hookFloatHandleClick error: " + t.getMessage());
+                            }
+                        }
+
+                        @Override
+                        protected void afterHookedMethod(MethodHookParam param) {
+                            // 只有官方恢复真的跑起来了才清标记（被我们拦成坞窗时任务还在浮标上，
+                            // 保活标记必须留着）。
+                            try {
+                                if (!Boolean.TRUE.equals(param.getObjectExtra("fwRestorePass"))) return;
+                                Object info = param.args[0];
+                                if (info == null) return;
+                                int taskId = XposedHelpers.getIntField(info, "taskId");
+                                Object task = LivelyHook.taskById(sClassLoader, taskId);
+                                if (task == null) {
+                                    XposedBridge.log(TAG + " restore clear marks: task not found taskId=" + taskId);
+                                    return;
+                                }
+                                // insensible 残留会让 InsensibleTaskController 把 BACK 键整个吞掉，
+                                // 小窗恢复后按返回毫无反应就出在这里。
+                                FloatKeepAliveHook.clearTaskLively(task);
+                                XposedBridge.log(TAG + " cleared lively marks on restore taskId=" + taskId);
+                            } catch (Throwable t) {
+                                XposedBridge.log(TAG + " restore clear marks error: " + t.getMessage());
                             }
                         }
                     });

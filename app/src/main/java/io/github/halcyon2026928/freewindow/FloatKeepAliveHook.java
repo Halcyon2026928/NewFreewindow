@@ -240,6 +240,33 @@ final class FloatKeepAliveHook {
     /** 任务标记：息屏继续跑、别把隐藏当成掉后台。缺哪个方法就跳过。 */
     private static void markTaskLively(Object task) {
         if (task == null) return;
+        Object ext = extOf(task);
+        for (String name : LIVELY_FLAGS) {
+            callQuietly(ext, name, true);
+        }
+        // 这个是 int 形参（1 = 不敏感），不能跟着上面按 boolean 一起传。
+        callQuietly(ext, "setInsensibleFlag", 1);
+    }
+
+    /**
+     * 从浮标/坞窗恢复成可见自由小窗时，把 minimize 阶段打上的整套标记清掉。
+     *
+     * <p>其中 {@code insensibleFlag} 最关键：系统的
+     * {@code InsensibleTaskController.ignoreBackKeyEventIfNeeded} 对「不敏感任务 + 无白条 +
+     * 在屏内」直接返回 true 把 BACK 键吞掉（原厂只在屏外拉起的 AI 窗口上打这个标记）。
+     * 标记残留在恢复后的小窗上，表现就是「按返回没反应、页面不后退、窗口只浮在桌面上」。
+     * 官方恢复路径只清了 {@code setSkipMoveTaskToBack}，不会清 insensible，所以必须我们自己清。
+     */
+    static void clearTaskLively(Object task) {
+        if (task == null) return;
+        Object ext = extOf(task);
+        for (String name : LIVELY_FLAGS) {
+            callQuietly(ext, name, false);
+        }
+        callQuietly(ext, "setInsensibleFlag", 0);
+    }
+
+    private static Object extOf(Object task) {
         Object ext = task;
         try {
             Object wrapper = XposedHelpers.callMethod(task, "getWrapper");
@@ -251,11 +278,7 @@ final class FloatKeepAliveHook {
                 ext = task;
             }
         }
-        for (String name : LIVELY_FLAGS) {
-            callQuietly(ext, name, true);
-        }
-        // 这个是 int 形参（1 = 不敏感），不能跟着上面按 boolean 一起传。
-        callQuietly(ext, "setInsensibleFlag", 1);
+        return ext;
     }
 
     private static Object taskArg(XC_MethodHook.MethodHookParam param) {
