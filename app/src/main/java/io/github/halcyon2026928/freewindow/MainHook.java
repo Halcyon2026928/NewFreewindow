@@ -542,11 +542,34 @@ public class MainHook implements IXposedHookLoadPackage {
                                 Region region = (Region) param.args[0];
                                 if (region == null) return;
 
-                                Object regionMgr = XposedHelpers.getObjectField(param.thisObject, "mFlexibleCaptionViewRegionMgr");
-                                if (regionMgr == null) return;
+                                /*
+                                 * 只挖三点按钮图标本身的区域（mThreeButtonFrame）。
+                                 *
+                                 * 之前挖的是 mHandleButtonRegion，而那个矩形在系统里是整条
+                                 * 可拖动标题带：FlexibleCaptionViewTouchRegionMgr
+                                 *   getFlexibleTaskActionFlag() 命中 mHandleButtonRegion 时
+                                 *   return 1（HANDLE_EVENT，拾起窗口开始拖动）。
+                                 * 把整条带子 DIFFERENCE 掉以后，标题栏上的触摸直接穿透给应用，
+                                 * 模块拿不到 HANDLE_EVENT，表现就是「偶尔拖动不了自由小窗」。
+                                 * 实测挖空区域是 [386,-94][1054,166] 这种 600×260 的大块。
+                                 */
+                                Object threeFrame = XposedHelpers.getObjectField(
+                                        param.thisObject, "mThreeButtonFrame");
+                                if (!(threeFrame instanceof View)) return;
 
-                                Rect btn = (Rect) XposedHelpers.getObjectField(regionMgr, "mHandleButtonRegion");
-                                if (btn == null || btn.isEmpty()) return;
+                                View btnView = (View) threeFrame;
+                                if (btnView.getVisibility() != View.VISIBLE || btnView.getAlpha() == 0f) return;
+
+                                Rect btn = new Rect(btnView.getLeft(), btnView.getTop(),
+                                        btnView.getRight(), btnView.getBottom());
+                                // 逐层累加父容器偏移，坐标要落到 caption 自己的本地系
+                                Object parent = btnView.getParent();
+                                while (parent instanceof View && parent != param.thisObject) {
+                                    View parentView = (View) parent;
+                                    btn.offset(parentView.getLeft(), parentView.getTop());
+                                    parent = parentView.getParent();
+                                }
+                                if (btn.isEmpty()) return;
 
                                 region.op(btn.left, btn.top, btn.right, btn.bottom, Region.Op.DIFFERENCE);
                                 XposedBridge.log(TAG + " carved three-dot touch region for touch-through: "
