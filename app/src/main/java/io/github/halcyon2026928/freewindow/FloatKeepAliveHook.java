@@ -388,6 +388,16 @@ final class FloatKeepAliveHook {
                                     "task" + taskIdOf(param.thisObject) + " 用户从浮标打开，放行可见");
                             return;
                         }
+                        // 用户从桌面/最近任务正常打开这个还在保活里的 task：
+                        // 这条路径不经过 FloatHandleController.moveTaskToFront，拿不到
+                        // sUserFloatOpenAt 白名单。若继续拒掉可见性，窗口会停在
+                        // isFocused=true + isVisible=false —— 输入法 attach 不上，
+                        // 表现为「从桌面打开后点输入框弹不出键盘」。
+                        if (SystemClock.uptimeMillis() >= sSuppressFloatEjectAt
+                                && isTopRootTask(param.thisObject)) {
+                            leaveKeepAlive(param.thisObject, "visible");
+                            return;
+                        }
                         param.args[0] = Boolean.FALSE;
                         logOnce("deny_raised_" + taskIdOf(param.thisObject),
                                 "task" + taskIdOf(param.thisObject) + " 拒绝抬成可见（浮标保持）");
@@ -411,6 +421,13 @@ final class FloatKeepAliveHook {
                     if (!(arg instanceof Boolean) || !((Boolean) arg).booleanValue()) return;
                     if (!shouldKeep(param.thisObject)) return;
                     if (SystemClock.uptimeMillis() < sUserFloatOpenAt) return;
+                    // 同 setVisibleRequested：桌面/最近任务把 task 抬到顶层时是用户在正常
+                    // 打开它，必须放行并退出保活，否则窗口「有焦点不可见」，输入法失效。
+                    if (SystemClock.uptimeMillis() >= sSuppressFloatEjectAt
+                            && isTopRootTask(param.thisObject)) {
+                        leaveKeepAlive(param.thisObject, "visibility");
+                        return;
+                    }
                     param.args[0] = Boolean.FALSE;
                     logOnce("deny_visibility_" + taskIdOf(param.thisObject),
                             "task" + taskIdOf(param.thisObject) + " 拒绝提交可见性（浮标保持）");
@@ -429,6 +446,23 @@ final class FloatKeepAliveHook {
                     if (!(stateArg instanceof Enum)) return;
                     String state = ((Enum<?>) stateArg).name();
                     if (((Method) param.method).getReturnType() != Void.TYPE) return;
+                    /*
+                     * 用户从桌面 / 最近任务正常打开一个贴过边的应用时，走的是 task 到前台
+                     * + resume 这条正常流程，不经过 FloatHandleController.moveTaskToFront，
+                     * 也就没有 clearTaskLively 的机会。minimize 阶段打的 insensibleFlag 会
+                     * 一路残留，系统的
+                     *   FlexibleWindowUtils.isNoSensibleFlexibleWindow(task)
+                     * 于是判定为真，WindowStateExtImpl.cannotBeImeTarget 返回 true：
+                     * 窗口不能当输入法宿主，点输入框永远弹不出键盘（5200 22:19:10 起的
+                     * "cannotBeImeTarget while target is insensible window"）。
+                     * 这里按「record 已在 display 顶层 root task 上」判定为用户正常打开，
+                     * 立刻清掉整套标记。浮标里的任务不是顶层 root task，不会被误清。
+                     */
+                    if ("RESUMED".equals(state) && isTopRootTask(param.thisObject)) {
+                        Object task = callNoArg(param.thisObject, "getTask");
+                        clearTaskLively(task);
+                        leaveKeepAlive(param.thisObject, "resumed_top");
+                    }
                     if (!shouldKeep(param.thisObject)) return;
                     if (STOP_STATES.contains(state)) {
                         logSkip(param.thisObject, "state_" + state);
@@ -694,9 +728,42 @@ final class FloatKeepAliveHook {
         }
     }
 
+    /**
+     * 这个 record 是否已经坐在 display 的顶层 root task 上。
+     *
+     * 从桌面 / 最近任务打开一个还在浮标保活里的应用时，系统会复用原 task 并把它
+     * bring 到最前，此时它就是顶层 root task。这条路径不经过
+     * FloatHandleController.moveTaskToFront，所以没有 sUserFloatOpenAt 白名单。
+     */
+    private static boolean isTopRootTask(Object record) {
+        try {
+            Object task = callNoArg(record, "getTask");
+            if (task == null) return false;
+            return Boolean.TRUE.equals(callNoArg(task, "isTopRootTaskInDisplayArea"));
+        } catch (Throwable t) {
+            return false;
+        }
+    }
+
+    /**
+     * 退出保活：用户从外部（桌面 / 最近任务）把任务正常打开时调用。
+     *
+     * 只需要把记录从 sTracked 摘掉并放行可见性；浮标本身由系统
+     * FloatHandleController 在 bring-to-front 时自己摘除，不用模块插手。
+     */
+    private static void leaveKeepAlive(Object record, String reason) {
+        try {
+            int taskId = taskIdOf(record);
+            if (taskId > 0) sTracked.remove(taskId);
+            logOnce("leave_" + taskId + "_" + reason,
+                    "task" + taskId + " 用户从外部正常打开，退出保活并放行可见性（" + reason + "）");
+        } catch (Throwable t) {
+            XposedBridge.log(TAG + " leaveKeepAlive error: " + t.getMessage());
+        }
+    }
+
     /** 仍是浮标、却被按成可见的任务，重新压回不可见，让它回到浮标状态。 */
-    private static void rehideTracked(String reason) {
-        for (java.util.Map.Entry<Integer, WeakReference<Object>> entry : sTracked.entrySet()) {
+    private static void rehideTracked(String reason) {        for (java.util.Map.Entry<Integer, WeakReference<Object>> entry : sTracked.entrySet()) {
             Object record = entry.getValue() == null ? null : entry.getValue().get();
             if (record == null) continue;
             if (!isFloating(entry.getKey().intValue())) continue;
