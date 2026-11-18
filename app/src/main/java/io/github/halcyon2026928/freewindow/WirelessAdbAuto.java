@@ -8,10 +8,6 @@ import android.os.Handler;
 import android.os.Looper;
 import android.provider.Settings;
 
-import de.robv.android.xposed.XC_MethodHook;
-import de.robv.android.xposed.XSharedPreferences;
-import de.robv.android.xposed.XposedBridge;
-import de.robv.android.xposed.XposedHelpers;
 
 /**
  * 开机首次解锁后自动打开系统「无线调试」。

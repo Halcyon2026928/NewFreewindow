@@ -8,13 +8,11 @@ android {
 
     defaultConfig {
         applicationId "io.github.halcyon2026928.freewindow"
-        minSdk 21
-        // targetSdk 必须 < 33：Android 13+ 对 targetSdk>=33 的应用禁止写 Settings.System
-        //（enforceRestrictedSystemSettingsMutationForCallingPackage 抛 SecurityException），
-        // 降到 32 仅警告、放行写入；模块为 Xposed 用途，不受 targetSdk 影响。
+        // libxposed/api（现代 Xposed API）要求 minSdk 26。
+        minSdk 26
         targetSdk 32
-        versionCode 28
-        versionName "3.9.1"
+        versionCode 29
+        versionName "3.9.2"
     }
 
     buildTypes {
@@ -48,6 +46,5 @@ android {
 }
 
 dependencies {
-    compileOnly 'de.robv.android.xposed:api:82'
-    compileOnly 'de.robv.android.xposed:api:82:sources'
+    compileOnly 'io.github.libxposed:api:102.0.0'
 }

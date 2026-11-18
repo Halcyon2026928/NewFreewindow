@@ -1,6 +1,7 @@
 <?xml version="1.0" encoding="utf-8"?>
 <resources>
     <string name="app_name">灵动坞OS</string>
+    <string name="module_desc">隐藏自由小窗底部白条 / 顶部三点菜单栏，支持坞窗、贴边保活与游戏幻影屏后台，可独立开关</string>
 
     <string name="settings_title">灵动坞OS 设置</string>
     <string name="settings_subtitle">自由小窗装饰项，可独立开关</string>
