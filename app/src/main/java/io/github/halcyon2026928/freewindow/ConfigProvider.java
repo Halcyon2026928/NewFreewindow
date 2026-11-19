@@ -37,6 +37,9 @@ public class ConfigProvider extends ContentProvider {
                 prefs.getBoolean(SettingsActivity.KEY_KEEP_ALIVE, true) ? 1 : 0});
         c.addRow(new Object[]{SettingsActivity.KEY_UNLOCK_LIMIT,
                 prefs.getBoolean(SettingsActivity.KEY_UNLOCK_LIMIT, true) ? 1 : 0});
+        // 主题模式：0=跟随系统，1=浅色，2=深色。坞窗在 system 进程里按它配色。
+        c.addRow(new Object[]{SettingsActivity.KEY_THEME_MODE,
+                prefs.getInt(SettingsActivity.KEY_THEME_MODE, SettingsActivity.THEME_FOLLOW_SYSTEM)});
         return c;
     }
 

@@ -1,0 +1,11 @@
+<?xml version="1.0" encoding="utf-8"?>
+<vector xmlns:android="http://schemas.android.com/apk/res/android"
+    android:width="24dp"
+    android:height="24dp"
+    android:viewportWidth="1024"
+    android:viewportHeight="1024">
+    <!-- 跟随系统：整圆 + 右半镂空（用户给的 SVG 原样转过来） -->
+    <path
+        android:fillColor="#FFFFFF"
+        android:pathData="M511.8464 85.3504a426.7008 426.7008 0 1 1 0 853.3504 426.7008 426.7008 0 0 1 0-853.3504z m32 787.7632a362.5472 362.5472 0 0 0 0-722.3296v722.3296z" />
+</vector>

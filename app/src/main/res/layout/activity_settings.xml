@@ -5,7 +5,7 @@
     android:layout_height="match_parent"
     android:background="?attr/fwBackground"
     android:orientation="vertical"
-    android:padding="20dp">
+    android:padding="14dp">
 
     <!-- 顶部渐变胶囊标签 -->
     <TextView
@@ -75,7 +75,7 @@
         android:layout_width="match_parent"
         android:layout_height="0dp"
         android:layout_weight="1"
-        android:layout_marginTop="20dp"
+        android:layout_marginTop="10dp"
         android:clipToPadding="false"
         android:overScrollMode="never"
         android:scrollbars="none">
@@ -92,7 +92,7 @@
         android:background="?attr/fwCardBackground"
         android:gravity="center_vertical"
         android:orientation="horizontal"
-        android:padding="18dp">
+        android:padding="14dp">
 
         <LinearLayout
             android:layout_width="0dp"
@@ -111,7 +111,7 @@
             <TextView
                 android:layout_width="wrap_content"
                 android:layout_height="wrap_content"
-                android:layout_marginTop="3dp"
+                android:layout_marginTop="2dp"
                 android:text="@string/hide_bottom_bar_desc"
                 android:textColor="?attr/fwTextSecondary"
                 android:textSize="12sp" />
@@ -128,11 +128,11 @@
     <LinearLayout
         android:layout_width="match_parent"
         android:layout_height="wrap_content"
-        android:layout_marginTop="14dp"
+        android:layout_marginTop="9dp"
         android:background="?attr/fwCardBackground"
         android:gravity="center_vertical"
         android:orientation="horizontal"
-        android:padding="18dp">
+        android:padding="14dp">
 
         <LinearLayout
             android:layout_width="0dp"
@@ -151,7 +151,7 @@
             <TextView
                 android:layout_width="wrap_content"
                 android:layout_height="wrap_content"
-                android:layout_marginTop="3dp"
+                android:layout_marginTop="2dp"
                 android:text="@string/hide_three_dot_desc"
                 android:textColor="?attr/fwTextSecondary"
                 android:textSize="12sp" />
@@ -168,11 +168,11 @@
     <LinearLayout
         android:layout_width="match_parent"
         android:layout_height="wrap_content"
-        android:layout_marginTop="14dp"
+        android:layout_marginTop="9dp"
         android:background="?attr/fwCardBackground"
         android:gravity="center_vertical"
         android:orientation="horizontal"
-        android:padding="18dp">
+        android:padding="14dp">
 
         <LinearLayout
             android:layout_width="0dp"
@@ -191,7 +191,7 @@
             <TextView
                 android:layout_width="wrap_content"
                 android:layout_height="wrap_content"
-                android:layout_marginTop="3dp"
+                android:layout_marginTop="2dp"
                 android:text="@string/enable_dock_desc"
                 android:textColor="?attr/fwTextSecondary"
                 android:textSize="12sp" />
@@ -208,11 +208,11 @@
     <LinearLayout
         android:layout_width="match_parent"
         android:layout_height="wrap_content"
-        android:layout_marginTop="14dp"
+        android:layout_marginTop="9dp"
         android:background="?attr/fwCardBackground"
         android:gravity="center_vertical"
         android:orientation="horizontal"
-        android:padding="18dp">
+        android:padding="14dp">
 
         <LinearLayout
             android:layout_width="0dp"
@@ -231,7 +231,7 @@
             <TextView
                 android:layout_width="wrap_content"
                 android:layout_height="wrap_content"
-                android:layout_marginTop="3dp"
+                android:layout_marginTop="2dp"
                 android:text="@string/keep_alive_desc"
                 android:textColor="?attr/fwTextSecondary"
                 android:textSize="12sp" />
@@ -248,11 +248,11 @@
     <LinearLayout
         android:layout_width="match_parent"
         android:layout_height="wrap_content"
-        android:layout_marginTop="14dp"
+        android:layout_marginTop="9dp"
         android:background="?attr/fwCardBackground"
         android:gravity="center_vertical"
         android:orientation="horizontal"
-        android:padding="18dp">
+        android:padding="14dp">
 
         <LinearLayout
             android:layout_width="0dp"
@@ -271,7 +271,7 @@
             <TextView
                 android:layout_width="wrap_content"
                 android:layout_height="wrap_content"
-                android:layout_marginTop="3dp"
+                android:layout_marginTop="2dp"
                 android:text="@string/unlock_limit_desc"
                 android:textColor="?attr/fwTextSecondary"
                 android:textSize="12sp" />
@@ -289,13 +289,13 @@
         android:id="@+id/card_donate"
         android:layout_width="match_parent"
         android:layout_height="wrap_content"
-        android:layout_marginTop="14dp"
+        android:layout_marginTop="9dp"
         android:background="?attr/fwCardBackground"
         android:clickable="true"
         android:focusable="true"
         android:gravity="center_vertical"
         android:orientation="horizontal"
-        android:padding="18dp">
+        android:padding="14dp">
 
         <LinearLayout
             android:layout_width="0dp"
@@ -314,7 +314,7 @@
             <TextView
                 android:layout_width="wrap_content"
                 android:layout_height="wrap_content"
-                android:layout_marginTop="3dp"
+                android:layout_marginTop="2dp"
                 android:text="@string/donate_desc"
                 android:textColor="?attr/fwTextSecondary"
                 android:textSize="12sp" />
@@ -338,7 +338,7 @@
     <TextView
         android:layout_width="match_parent"
         android:layout_height="wrap_content"
-        android:layout_marginTop="20dp"
+        android:layout_marginTop="10dp"
         android:gravity="center"
         android:text="@string/settings_hint"
         android:textColor="?attr/fwTextHint"

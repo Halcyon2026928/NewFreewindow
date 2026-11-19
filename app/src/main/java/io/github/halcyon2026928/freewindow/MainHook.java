@@ -4,6 +4,7 @@ import android.content.ContentResolver;
 import android.content.Context;
 import android.content.pm.ApplicationInfo;
 import android.content.pm.PackageManager;
+import android.content.res.Configuration;
 import android.database.Cursor;
 import android.graphics.Bitmap;
 import android.graphics.PixelFormat;
@@ -47,6 +48,8 @@ public class MainHook implements IXposedHookLoadPackage {
     private static final String KEY_ENABLE_DOCK = "enable_float_dock";
     /** 解除自由小窗数量上限的开关（关掉就退回系统默认的 2 个）。 */
     private static final String KEY_UNLOCK_LIMIT = "unlock_float_limit";
+    /** App 里的主题模式（0=跟随系统，1=浅色，2=深色），坞窗配色跟着它走。 */
+    private static final String KEY_THEME_MODE = "theme_mode";
 
     /** 设为 true 时会把 FlexibleTaskCaptionView 的完整视图树打印到 Xposed 日志，便于在真机上确认三点按钮的确切 id。 */
     private static final boolean DUMP_CAPTION_TREE = false;
@@ -58,6 +61,8 @@ public class MainHook implements IXposedHookLoadPackage {
     private boolean enableDock = true;
     /** 解除数量上限开关；关掉时上限 hook 一个都不装，系统保持官方 2 个。 */
     private boolean unlockFloatLimit = true;
+    /** App 的主题模式（0=跟随系统，1=浅色，2=深色）。坞窗配色跟它同步。 */
+    private int themeMode = 0;
     private boolean configLoaded = false;
 
     /** 系统框架 ClassLoader。 */
@@ -153,6 +158,8 @@ public class MainHook implements IXposedHookLoadPackage {
                             enableDock = value == 1;
                         } else if (KEY_UNLOCK_LIMIT.equals(key)) {
                             unlockFloatLimit = value == 1;
+                        } else if (KEY_THEME_MODE.equals(key)) {
+                            themeMode = value;
                         }
                     }
                     configLoaded = true;
@@ -180,6 +187,7 @@ public class MainHook implements IXposedHookLoadPackage {
             hideThreeDot = prefs.getBoolean(KEY_HIDE_THREE_DOT, true);
             enableDock = prefs.getBoolean(KEY_ENABLE_DOCK, true);
             unlockFloatLimit = prefs.getBoolean(KEY_UNLOCK_LIMIT, true);
+            themeMode = prefs.getInt(KEY_THEME_MODE, 0);
             configLoaded = true;
             XposedBridge.log(TAG + " config(xprefs readable=" + prefs.getFile().canRead()
                     + ") -> hideBottomBar=" + hideBottomBar
@@ -1315,8 +1323,10 @@ public class MainHook implements IXposedHookLoadPackage {
             // 坞窗主体
             LinearLayout dock = new LinearLayout(ctx);
             dock.setOrientation(LinearLayout.VERTICAL);
+            final boolean night = isNightMode(ctx);
             GradientDrawable dockBg = new GradientDrawable();
-            dockBg.setColor(0xE5E5E5E5); // #e5e5e5 with alpha
+            // 深色模式下换成半透明深灰，浅色仍是原来的 #e5e5e5
+            dockBg.setColor(night ? 0xE51E1E1E : 0xE5E5E5E5);
             int dockCorner = dpToPx(ctx, 20);
             if (side == 1) {
                 // 右边弹出，左边圆角
@@ -1378,11 +1388,11 @@ public class MainHook implements IXposedHookLoadPackage {
             // 清除按钮（坞窗容器内的普通 View，随坞窗一起显示/消失）
             TextView clearBtn = new TextView(ctx);
             clearBtn.setText("清除");
-            clearBtn.setTextColor(0xFF000000);
+            clearBtn.setTextColor(night ? 0xFFEDEDED : 0xFF000000);
             clearBtn.setTextSize(15);
             clearBtn.setGravity(Gravity.CENTER);
             GradientDrawable clearBg = new GradientDrawable();
-            clearBg.setColor(0xFFF3F3F3);
+            clearBg.setColor(night ? 0xFF2E2E2E : 0xFFF3F3F3);
             clearBg.setCornerRadius(dpToPx(ctx, 24));
             clearBtn.setBackground(clearBg);
             LinearLayout.LayoutParams clearParams = new LinearLayout.LayoutParams(
@@ -1720,6 +1730,7 @@ public class MainHook implements IXposedHookLoadPackage {
         XposedBridge.log(TAG + " addAppCard pkg=" + pkgName + " taskId=" + taskId + " userId=" + userId);
 
         // 卡片容器（透明背景）
+        final boolean night = isNightMode(ctx);
         LinearLayout card = new LinearLayout(ctx);
         card.setOrientation(LinearLayout.VERTICAL);
         LinearLayout.LayoutParams cardParams = new LinearLayout.LayoutParams(
@@ -1752,7 +1763,7 @@ public class MainHook implements IXposedHookLoadPackage {
         // 应用名称：与图标同高并垂直居中，关掉字体上下留白，避免文字视觉上偏
         TextView nameTv = new TextView(ctx);
         nameTv.setTextSize(14);
-        nameTv.setTextColor(0xFF000000);
+        nameTv.setTextColor(night ? 0xFFE6E6E6 : 0xFF000000);
         nameTv.setMaxLines(1);
         nameTv.setGravity(Gravity.CENTER_VERTICAL);
         nameTv.setIncludeFontPadding(false);
@@ -1773,7 +1784,7 @@ public class MainHook implements IXposedHookLoadPackage {
         final TextView menuBtn = new TextView(ctx);
         menuBtn.setText("⋮");
         menuBtn.setTextSize(22);
-        menuBtn.setTextColor(0xFF333333);
+        menuBtn.setTextColor(night ? 0xFFB9B9B9 : 0xFF333333);
         menuBtn.setGravity(Gravity.CENTER);
         menuBtn.setPadding(dpToPx(ctx, 8), 0, dpToPx(ctx, 8), 0);
         menuBtn.setMinWidth(dpToPx(ctx, 36));
@@ -1998,6 +2009,7 @@ public class MainHook implements IXposedHookLoadPackage {
             return;
         }
         final ViewGroup container = sDockContainer;
+        final boolean night = isNightMode(ctx);
 
         final int menuWidth = dpToPx(ctx, 130);
         final int itemHeight = dpToPx(ctx, 44);
@@ -2006,7 +2018,7 @@ public class MainHook implements IXposedHookLoadPackage {
         LinearLayout menuContainer = new LinearLayout(ctx);
         menuContainer.setOrientation(LinearLayout.VERTICAL);
         GradientDrawable menuBg = new GradientDrawable();
-        menuBg.setColor(0xFFFFFFFF);
+        menuBg.setColor(night ? 0xFF2B2B2B : 0xFFFFFFFF);
         menuBg.setCornerRadius(dpToPx(ctx, 12));
         menuContainer.setBackground(menuBg);
         menuContainer.setElevation(dpToPx(ctx, 8));
@@ -2019,7 +2031,7 @@ public class MainHook implements IXposedHookLoadPackage {
             // 分隔线（第一项不加）
             if (i > 0) {
                 View divider = new View(ctx);
-                divider.setBackgroundColor(0x14000000);
+                divider.setBackgroundColor(night ? 0x1FFFFFFF : 0x14000000);
                 LinearLayout.LayoutParams dividerParams = new LinearLayout.LayoutParams(
                         menuWidth - dpToPx(ctx, 28), 1);
                 dividerParams.leftMargin = dpToPx(ctx, 14);
@@ -2028,7 +2040,7 @@ public class MainHook implements IXposedHookLoadPackage {
             TextView itemTv = new TextView(ctx);
             itemTv.setText(item);
             itemTv.setTextSize(14);
-            itemTv.setTextColor(0xFF222222);
+            itemTv.setTextColor(night ? 0xFFE6E6E6 : 0xFF222222);
             itemTv.setGravity(Gravity.CENTER_VERTICAL);
             itemTv.setPadding(dpToPx(ctx, 16), 0, dpToPx(ctx, 16), 0);
             itemTv.setClickable(true);
@@ -2821,5 +2833,28 @@ public class MainHook implements IXposedHookLoadPackage {
     private int dpToPx(Context ctx, int dp) {
         return (int) TypedValue.applyDimension(TypedValue.COMPLEX_UNIT_DIP, dp,
                 ctx.getResources().getDisplayMetrics());
+    }
+
+    /**
+     * 坞窗要不要用深色。
+     *
+     * <p>跟 App 设置页右上角那个按钮的三态一致：0=跟随系统（读 system 的 uiMode）、
+     * 1=固定浅色、2=固定深色。坞窗挂在 system 进程里读不到 App 的 `ui_prefs`，
+     * 所以这个值同时写进了模块配置（ConfigProvider 即时查 + XSharedPreferences 重启兜底），
+     * 每次打开坞窗重新拉一次，做到「App 里切完、重开坞窗就变」。
+     */
+    private boolean isNightMode(Context ctx) {
+        try {
+            if (ctx != null) loadConfigFromContext(ctx);
+        } catch (Throwable ignored) {
+        }
+        if (themeMode == 1) return false;
+        if (themeMode == 2) return true;
+        try {
+            Configuration cfg = ctx.getResources().getConfiguration();
+            return (cfg.uiMode & Configuration.UI_MODE_NIGHT_MASK) == Configuration.UI_MODE_NIGHT_YES;
+        } catch (Throwable t) {
+            return false;
+        }
     }
 }
