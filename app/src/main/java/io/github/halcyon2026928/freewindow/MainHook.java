@@ -207,13 +207,6 @@ public class MainHook implements IXposedHookLoadPackage {
             XposedBridge.log(TAG + " FloatKeepAliveHook install failed: " + t.getMessage());
         }
 
-        // 开发者选项：开机首次解锁后自动打开系统「无线调试」。
-        try {
-            WirelessAdbAuto.install(lpparam.classLoader);
-        } catch (Throwable t) {
-            XposedBridge.log(TAG + " WirelessAdbAuto install failed: " + t.getMessage());
-        }
-
         // 解除「自由小窗 / 迷你浮窗」的数量上限（系统默认 2）。
         // 两个机型限制落点不同：
         //   5200(Android 17 / ColorOS 17)：FloatHandleController.getLimitMaxFloatNum() 读字段 mLimitMaxFloatNum；

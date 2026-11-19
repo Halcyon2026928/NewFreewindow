@@ -31,10 +31,6 @@
     <string name="donate_dialog_close">关闭</string>
     <string name="donate_qr_desc">微信 / 支付宝 扫一扫；支付宝扫码还能领红包（点图可放大）</string>
 
-    <string name="dev_options_title">开发者选项</string>
-    <string name="dev_auto_wireless_adb_title">开机自动打开无线调试</string>
-    <string name="dev_auto_wireless_adb_desc">开机首次解锁后自动把系统「无线调试」打开，省去每次手动点开关；端口仍由系统随机分配，仅建议在可信局域网使用</string>
-
     <string name="theme_to_dark">深色</string>
     <string name="theme_to_light">浅色</string>
 </resources>

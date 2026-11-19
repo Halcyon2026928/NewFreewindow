@@ -31,9 +31,6 @@ public class SettingsActivity extends Activity {
     public static final String KEY_UNLOCK_LIMIT = "unlock_float_limit";
     /** 贴边保活开关，与 FloatKeepAliveHook 读取的键一致。 */
     public static final String KEY_KEEP_ALIVE = FloatKeepAliveHook.KEY_KEEP_ALIVE;
-    /** 开发者选项：开机自动打开系统「无线调试」，与 WirelessAdbAuto 一致。 */
-    public static final String KEY_AUTO_WIRELESS_ADB = WirelessAdbAuto.KEY;
-
     private static final String UI_PREFS = "ui_prefs";
     private static final String KEY_LIGHT_THEME = "light_theme";
 
@@ -41,7 +38,6 @@ public class SettingsActivity extends Activity {
     private Switch threeDotSwitch;
     private Switch dockSwitch;
     private Switch keepAliveSwitch;
-    private Switch autoWirelessAdbSwitch;
     private Switch unlockLimitSwitch;
     private boolean syncing = false;
 
@@ -69,7 +65,6 @@ public class SettingsActivity extends Activity {
         threeDotSwitch = findViewById(R.id.switch_three_dot);
         dockSwitch = findViewById(R.id.switch_dock);
         keepAliveSwitch = findViewById(R.id.switch_keep_alive);
-        autoWirelessAdbSwitch = findViewById(R.id.switch_auto_wireless_adb);
         unlockLimitSwitch = findViewById(R.id.switch_unlock_limit);
 
         syncFromPrefs();
@@ -100,13 +95,6 @@ public class SettingsActivity extends Activity {
             public void onCheckedChanged(CompoundButton buttonView, boolean isChecked) {
                 if (syncing) return;
                 writePref(KEY_KEEP_ALIVE, isChecked);
-            }
-        });
-        autoWirelessAdbSwitch.setOnCheckedChangeListener(new CompoundButton.OnCheckedChangeListener() {
-            @Override
-            public void onCheckedChanged(CompoundButton buttonView, boolean isChecked) {
-                if (syncing) return;
-                writePref(KEY_AUTO_WIRELESS_ADB, isChecked);
             }
         });
         unlockLimitSwitch.setOnCheckedChangeListener(new CompoundButton.OnCheckedChangeListener() {
@@ -335,7 +323,6 @@ public class SettingsActivity extends Activity {
         threeDotSwitch.setChecked(readPref(KEY_HIDE_THREE_DOT, true));
         dockSwitch.setChecked(readPref(KEY_ENABLE_DOCK, true));
         keepAliveSwitch.setChecked(readPref(KEY_KEEP_ALIVE, true));
-        autoWirelessAdbSwitch.setChecked(readPref(KEY_AUTO_WIRELESS_ADB, false));
         unlockLimitSwitch.setChecked(readPref(KEY_UNLOCK_LIMIT, true));
         syncing = false;
     }
