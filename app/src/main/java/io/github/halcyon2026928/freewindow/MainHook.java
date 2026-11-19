@@ -539,20 +539,20 @@ public class MainHook implements IXposedHookLoadPackage {
                             try {
                                 if (!hideThreeDot) return;
 
+                                /*
+                                 * 特殊机型（ColorOS 16，如 PLK110_16.0.0.211）：该 ROM 上
+                                 * mThreeButtonFrame / mHandleButtonRegion 都铺满整个 caption
+                                 * （实测日志 [0,0][1272,2261]），挖任何一块都会让标题栏拿不到
+                                 * HANDLE_EVENT、小窗拖不动。该机型不做穿透，保持原厂触摸区。
+                                 */
+                                if (isColorOs16Rom()) {
+                                    XposedBridge.log(TAG + " skip carve on coloros16 rom: " + romDisplayId());
+                                    return;
+                                }
+
                                 Region region = (Region) param.args[0];
                                 if (region == null) return;
 
-                                /*
-                                 * 只挖三点按钮图标本身的区域（mThreeButtonFrame）。
-                                 *
-                                 * 之前挖的是 mHandleButtonRegion，而那个矩形在系统里是整条
-                                 * 可拖动标题带：FlexibleCaptionViewTouchRegionMgr
-                                 *   getFlexibleTaskActionFlag() 命中 mHandleButtonRegion 时
-                                 *   return 1（HANDLE_EVENT，拾起窗口开始拖动）。
-                                 * 把整条带子 DIFFERENCE 掉以后，标题栏上的触摸直接穿透给应用，
-                                 * 模块拿不到 HANDLE_EVENT，表现就是「偶尔拖动不了自由小窗」。
-                                 * 实测挖空区域是 [386,-94][1054,166] 这种 600×260 的大块。
-                                 */
                                 Object threeFrame = XposedHelpers.getObjectField(
                                         param.thisObject, "mThreeButtonFrame");
                                 if (!(threeFrame instanceof View)) return;
@@ -562,7 +562,6 @@ public class MainHook implements IXposedHookLoadPackage {
 
                                 Rect btn = new Rect(btnView.getLeft(), btnView.getTop(),
                                         btnView.getRight(), btnView.getBottom());
-                                // 逐层累加父容器偏移，坐标要落到 caption 自己的本地系
                                 Object parent = btnView.getParent();
                                 while (parent instanceof View && parent != param.thisObject) {
                                     View parentView = (View) parent;
@@ -583,6 +582,58 @@ public class MainHook implements IXposedHookLoadPackage {
         } catch (Throwable t) {
             XposedBridge.log(TAG + " hook updateTouchableRegion failed: " + t.getMessage());
         }
+    }
+
+    /** 设备 rom 版本串：PLK110_16.0.0.211(CN01)、RMX5200_17.0.0.xxx、RMX3820_16.0.3.501。 */
+    private static String sRomDisplayId;
+
+    private static String romDisplayId() {
+        if (sRomDisplayId != null) return sRomDisplayId;
+        try {
+            Class<?> sp = Class.forName("android.os.SystemProperties");
+            Object v = sp.getMethod("get", String.class).invoke(null, "ro.build.display.id");
+            sRomDisplayId = (v instanceof String) ? (String) v : "";
+        } catch (Throwable t) {
+            sRomDisplayId = "";
+        }
+        return sRomDisplayId;
+    }
+
+    /**
+     * 是否为 ColorOS 16（OPPO / 一加上一代系统）。
+     *
+     * <p>规则：
+     * <ul>
+     *   <li>realme 机型（版本串前缀为 RMX，如 {@code RMX3820_16.0.3.501}）一律不算——
+     *       realme UI 的版本号里同样带 16，容易和 ColorOS 16 混；</li>
+     *   <li>其余机型取 {@code _} 之后的第一段版本号，{@code 16.} 开头即 ColorOS 16；
+     *       ColorOS 17 是 {@code 17.} 开头，例如 {@code CPH2791_17.0.0.102}。</li>
+     * </ul>
+     */
+    private static boolean isColorOs16Rom() {
+        String id = romDisplayId();
+        if (id.isEmpty()) return false;
+        int us = id.indexOf('_');
+        if (us < 0 || us + 3 > id.length()) return false;
+        String model = id.substring(0, us);
+        if (model.startsWith("RMX")) return false;
+        String ver = id.substring(us + 1);
+        return ver.startsWith("16.");
+    }
+
+    /**
+     * 触摸矩形是否大得不像「三点按钮热区」（面积 ≥ caption 的 40%）。
+     * 用来防止某些 ROM 把 mHandleButtonRegion 放大成整块，从而把关闭/全屏按钮的点击一起吞掉。
+     */
+    private static boolean isRegionTooLarge(Object captionView, Rect rect) {
+        if (!(captionView instanceof View) || rect == null) return true;
+        View v = (View) captionView;
+        int w = v.getWidth();
+        int h = v.getHeight();
+        if (w <= 0 || h <= 0) return true;
+        long all = (long) w * h;
+        long area = (long) rect.width() * rect.height();
+        return area * 10 >= all * 4;
     }
 
     /**
@@ -608,16 +659,35 @@ public class MainHook implements IXposedHookLoadPackage {
                                 if (regionMgr == null) return;
 
                                 int actionFlag = (int) XposedHelpers.getIntField(thisObj, "mActionFlag");
-                                if (actionFlag != 1) return; // HANDLE_EVENT，仅三点/把手按钮区
 
                                 Rect region = (Rect) XposedHelpers.getObjectField(regionMgr, "mHandleButtonRegion");
                                 if (region == null || region.isEmpty()) return;
 
                                 MotionEvent ev = (MotionEvent) param.args[0];
-                                if (region.contains((int) ev.getX(), (int) ev.getY())) {
-                                    XposedBridge.log(TAG + " blocked three-dot menu tap at " + (int) ev.getX() + "," + (int) ev.getY());
+                                int x = (int) ev.getX();
+                                int y = (int) ev.getY();
+                                if (!region.contains(x, y)) return;
+
+                                /*
+                                 * ColorOS 16（c16）：三点按钮的热区就是 mHandleButtonRegion
+                                 * 这一小块（mThreeButtonFrame 反而铺满整个 caption）。
+                                 * 该机型上 mActionFlag 有时来不及在 UP 之前更新为 1，
+                                 * 依赖 flag 判断会漏拦，表现就是「偶尔点出菜单」。
+                                 * 这里改成纯坐标判定，只要落进这一小块就吞掉。
+                                 * 若该 ROM 把这个矩形放大到接近整个 caption（覆盖关闭/全屏按钮），
+                                 * 则退回原来的 flag 判定，避免误吞其他按钮。
+                                 */
+                                if (isColorOs16Rom() && !isRegionTooLarge(thisObj, region)) {
+                                    XposedBridge.log(TAG + " blocked three-dot menu tap (c16, by rect) at "
+                                            + x + "," + y);
                                     param.setResult(false);
+                                    return;
                                 }
+
+                                if (actionFlag != 1) return; // HANDLE_EVENT，仅三点/把手按钮区
+
+                                XposedBridge.log(TAG + " blocked three-dot menu tap at " + x + "," + y);
+                                param.setResult(false);
                             } catch (Throwable t) {
                                 XposedBridge.log(TAG + " onSingleTapUp block error: " + t.getMessage());
                             }
