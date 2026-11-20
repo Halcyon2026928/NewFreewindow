@@ -527,6 +527,11 @@ public class MainHook implements IXposedHookLoadPackage {
      * hook FlexibleCaptionView.updateTouchableRegion(Region)：
      * 每次标题栏把触摸区域应用到 Surface 前，把三点按钮触摸区域挖空，
      * 使该位置触摸穿透到自由小窗中的应用。
+     *
+     * <p>挖空对象用系统真正的按钮热区 {@code mHandleButtonRegion}，不再用
+     * {@code mThreeButtonFrame}：RMX5200（realme UI 7）上这个外框实测铺满整个 caption
+     * （[0,0][1440,2560]），减掉它等于把整块触摸区做空，SurfaceControl 会把空 Region
+     * 当成「整窗可触摸」，标题栏反而吞掉整个小窗的事件 —— 表现就是迷你浮窗只能拖不能点。
      */
     private void hookTouchThroughCarve(Class<?> captionViewClass) {
         try {
@@ -551,29 +556,39 @@ public class MainHook implements IXposedHookLoadPackage {
                                     return;
                                 }
 
-                                Region region = (Region) param.args[0];
-                                if (region == null) return;
-
-                                Object threeFrame = XposedHelpers.getObjectField(
-                                        param.thisObject, "mThreeButtonFrame");
-                                if (!(threeFrame instanceof View)) return;
-
-                                View btnView = (View) threeFrame;
-                                if (btnView.getVisibility() != View.VISIBLE || btnView.getAlpha() == 0f) return;
-
-                                Rect btn = new Rect(btnView.getLeft(), btnView.getTop(),
-                                        btnView.getRight(), btnView.getBottom());
-                                Object parent = btnView.getParent();
-                                while (parent instanceof View && parent != param.thisObject) {
-                                    View parentView = (View) parent;
-                                    btn.offset(parentView.getLeft(), parentView.getTop());
-                                    parent = parentView.getParent();
+                                /*
+                                 * 迷你浮窗：系统故意把整个迷你矩形并进 caption 触摸区，靠它接手势和
+                                 * 「单击恢复小窗」。这里挖任何一块都会让迷你浮窗点不动，只在普通小窗态做穿透。
+                                 */
+                                if (isMiniZoomState(param.thisObject)) {
+                                    XposedBridge.log(TAG + " skip carve in mini state");
+                                    return;
                                 }
-                                if (btn.isEmpty()) return;
 
-                                region.op(btn.left, btn.top, btn.right, btn.bottom, Region.Op.DIFFERENCE);
+                                Region region = (Region) param.args[0];
+                                if (region == null || region.isEmpty()) return;
+
+                                Rect hot = handleButtonRegion(param.thisObject);
+                                if (hot == null || hot.isEmpty()) return;
+
+                                if (isRegionTooLarge(param.thisObject, hot)) {
+                                    XposedBridge.log(TAG + " skip carve: three-dot hot region too large "
+                                            + hot.toShortString());
+                                    return;
+                                }
+
+                                // 在副本上挖，且挖完必须还剩得下一块像样的触摸区，否则宁可放弃：
+                                // 空 Region 在 SurfaceControl 里等价「整窗可触摸」，比不穿透更糟。
+                                Region carved = new Region(region);
+                                carved.op(hot, Region.Op.DIFFERENCE);
+                                if (carved.isEmpty()) {
+                                    XposedBridge.log(TAG + " skip carve: region would become empty");
+                                    return;
+                                }
+                                // 别把 mRegion 本体挖掉，只替换这一次调用传出去的参数。
+                                param.args[0] = carved;
                                 XposedBridge.log(TAG + " carved three-dot touch region for touch-through: "
-                                        + btn.toShortString());
+                                        + hot.toShortString() + " remain=" + carved.getBounds().toShortString());
                             } catch (Throwable t) {
                                 XposedBridge.log(TAG + " updateTouchableRegion carve error: " + t.getMessage());
                             }
@@ -582,6 +597,29 @@ public class MainHook implements IXposedHookLoadPackage {
             XposedBridge.log(TAG + " touch-through carve hook success");
         } catch (Throwable t) {
             XposedBridge.log(TAG + " hook updateTouchableRegion failed: " + t.getMessage());
+        }
+    }
+
+    /** 迷你（含 ready）态：该状态下标题栏要独占整块区域做手势与单点恢复。 */
+    private static boolean isMiniZoomState(Object captionView) {
+        if (!(captionView instanceof View)) return false;
+        try {
+            Object v = XposedHelpers.callMethod(captionView, "isMiniZoomState");
+            return v instanceof Boolean && (Boolean) v;
+        } catch (Throwable ignored) {
+            return false;
+        }
+    }
+
+    /** 系统真正的三点按钮热区（caption 局部坐标），挖空以它为准。 */
+    private static Rect handleButtonRegion(Object captionView) {
+        try {
+            Object mgr = XposedHelpers.getObjectField(captionView, "mFlexibleCaptionViewRegionMgr");
+            if (mgr == null) return null;
+            Object r = XposedHelpers.getObjectField(mgr, "mHandleButtonRegion");
+            return (r instanceof Rect) ? new Rect((Rect) r) : null;
+        } catch (Throwable ignored) {
+            return null;
         }
     }
 
@@ -656,18 +694,23 @@ public class MainHook implements IXposedHookLoadPackage {
                                 if (!hideThreeDot) return; // 开关关闭：不做点击拦截
 
                                 Object thisObj = param.thisObject;
-                                Object regionMgr = XposedHelpers.getObjectField(thisObj, "mFlexibleCaptionViewRegionMgr");
-                                if (regionMgr == null) return;
 
-                                int actionFlag = (int) XposedHelpers.getIntField(thisObj, "mActionFlag");
+                                /*
+                                 * 迷你浮窗的单击是「恢复成自由小窗」（FlexibleTaskCaptionView
+                                 * onSingleTapConfirmed，要求 mActionFlag == 0）。这里吞掉会把
+                                 * 迷你浮窗的点击恢复打死，只在普通小窗态拦菜单。
+                                 */
+                                if (isMiniZoomState(thisObj)) return;
 
-                                Rect region = (Rect) XposedHelpers.getObjectField(regionMgr, "mHandleButtonRegion");
+                                Rect region = handleButtonRegion(thisObj);
                                 if (region == null || region.isEmpty()) return;
 
                                 MotionEvent ev = (MotionEvent) param.args[0];
                                 int x = (int) ev.getX();
                                 int y = (int) ev.getY();
                                 if (!region.contains(x, y)) return;
+
+                                int actionFlag = (int) XposedHelpers.getIntField(thisObj, "mActionFlag");
 
                                 /*
                                  * ColorOS 16（c16）：三点按钮的热区就是 mHandleButtonRegion
