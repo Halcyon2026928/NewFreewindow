@@ -18,3 +18,6 @@ Thumbs.db
 
 # Reverse engineering (decompiled third-party code)
 reverse/
+
+# Agent workspace
+.workbuddy/

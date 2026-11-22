@@ -29,6 +29,8 @@ public class SettingsActivity extends Activity {
     public static final String KEY_HIDE_BOTTOM_BAR = "hide_bottom_bar";
     public static final String KEY_HIDE_THREE_DOT = "hide_three_dot_menu";
     public static final String KEY_ENABLE_DOCK = "enable_float_dock";
+    /** 坞窗卡片是否显示实时画面；关闭时卡片只显示静态快照，点击和上下滚动都照常。 */
+    public static final String KEY_LIVE_PREVIEW = "live_preview";
     /** 解除自由小窗数量上限（官方 2 个 → 12 个），与 MainHook 的 unlock_float_limit 一致。 */
     public static final String KEY_UNLOCK_LIMIT = "unlock_float_limit";
     /** 贴边保活开关，与 FloatKeepAliveHook 读取的键一致。 */
@@ -47,6 +49,7 @@ public class SettingsActivity extends Activity {
     private Switch dockSwitch;
     private Switch keepAliveSwitch;
     private Switch unlockLimitSwitch;
+    private Switch livePreviewSwitch;
     private boolean syncing = false;
     /** 主题切换后要显示的提示文字：recreate 会重建页面，所以先存下来，在 onCreate 末尾再显示。 */
     private static String sPendingTip;
@@ -94,6 +97,15 @@ public class SettingsActivity extends Activity {
         dockSwitch = findViewById(R.id.switch_dock);
         keepAliveSwitch = findViewById(R.id.switch_keep_alive);
         unlockLimitSwitch = findViewById(R.id.switch_unlock_limit);
+        livePreviewSwitch = findViewById(R.id.switch_live_preview);
+
+        // 分组折叠：默认全部收起（首次安装没有记录就是收起），之后按上次记住的状态显示。
+        setupGroup(R.id.header_free_window, R.id.items_free_window,
+                R.id.arrow_free_window, "group_free_window_expanded");
+        setupGroup(R.id.header_background, R.id.items_background,
+                R.id.arrow_background, "group_background_expanded");
+        setupGroup(R.id.header_dock, R.id.items_dock,
+                R.id.arrow_dock, "group_dock_expanded");
 
         syncFromPrefs();
 
@@ -132,6 +144,18 @@ public class SettingsActivity extends Activity {
                 writePref(KEY_UNLOCK_LIMIT, isChecked);
             }
         });
+        livePreviewSwitch.setOnCheckedChangeListener(new CompoundButton.OnCheckedChangeListener() {
+            @Override
+            public void onCheckedChanged(CompoundButton buttonView, boolean isChecked) {
+                if (syncing) return;
+                writePref(KEY_LIVE_PREVIEW, isChecked);
+                // 通知 system_server 那边的坞窗：开关改了，下次打开卡片按新状态建。
+                try {
+                    getContentResolver().notifyChange(ConfigProvider.CONFIG_URI, null);
+                } catch (Throwable ignored) {
+                }
+            }
+        });
 
         // 捐赠入口：整张卡片可点，点开弹出收款码
         View donateCard = findViewById(R.id.card_donate);
@@ -153,6 +177,41 @@ public class SettingsActivity extends Activity {
      * <p>Android 12 起系统 Toast 会强制在左侧带应用图标，去不掉；这里直接在 DecorView 上
      * 加一个深色圆角 TextView，淡入、停留、淡出后移除，颜色也跟当前主题走。
      */
+    /**
+     * 一个大标题 + 它下面那组子项：点标题整行展开/收起。
+     * 箭头统一用 "›"（和二级菜单常见的右箭头一致），靠旋转区分状态：
+     * 收起时朝右（0°），展开时转 90° 朝下。
+     * 展开状态记在 ui_prefs 里：首次安装没有记录就是收起，之后按上次的状态显示。
+     */
+    private void setupGroup(int headerId, int itemsId, int arrowId, final String prefKey) {
+        View header = findViewById(headerId);
+        final View items = findViewById(itemsId);
+        final TextView arrow = findViewById(arrowId);
+        if (header == null || items == null || arrow == null) return;
+        final boolean[] expanded = {readGroupExpanded(prefKey)};
+        items.setVisibility(expanded[0] ? View.VISIBLE : View.GONE);
+        arrow.setRotation(expanded[0] ? 90f : 0f);
+        header.setOnClickListener(new View.OnClickListener() {
+            @Override
+            public void onClick(View v) {
+                expanded[0] = !expanded[0];
+                items.setVisibility(expanded[0] ? View.VISIBLE : View.GONE);
+                arrow.animate().rotation(expanded[0] ? 90f : 0f).setDuration(160).start();
+                writeGroupExpanded(prefKey, expanded[0]);
+            }
+        });
+    }
+
+    /** 分组的展开状态：只影响设置页观感，存在 UI_PREFS 里，不进模块配置通道。 */
+    private boolean readGroupExpanded(String key) {
+        return getSharedPreferences(UI_PREFS, Context.MODE_PRIVATE).getBoolean(key, false);
+    }
+
+    private void writeGroupExpanded(String key, boolean expanded) {
+        getSharedPreferences(UI_PREFS, Context.MODE_PRIVATE)
+                .edit().putBoolean(key, expanded).apply();
+    }
+
     private void showPendingTip() {
         final String text = sPendingTip;
         sPendingTip = null;
@@ -413,6 +472,7 @@ public class SettingsActivity extends Activity {
         dockSwitch.setChecked(readPref(KEY_ENABLE_DOCK, true));
         keepAliveSwitch.setChecked(readPref(KEY_KEEP_ALIVE, true));
         unlockLimitSwitch.setChecked(readPref(KEY_UNLOCK_LIMIT, true));
+        livePreviewSwitch.setChecked(readPref(KEY_LIVE_PREVIEW, true));
         syncing = false;
     }
 

@@ -94,6 +94,8 @@ final class MirageWindowHook {
     private static volatile boolean sReapScheduled = false;
     /** 悬浮球保留窗口按任务各记一份，一个任务贴边不会影响另一个的窗口。 */
     private static final Map<Integer, Long> sKeepFloatUntil = new ConcurrentHashMap<>();
+    /** 用户在坞窗里显式清除（「清除」「取消运行」）过的任务：保留窗口和挂起保活全部放行。 */
+    private static final Set<Integer> sUserRemoved = ConcurrentHashMap.newKeySet();
 
     private static Handler sMain;
     private static ClassLoader sClassLoader;
@@ -676,6 +678,57 @@ final class MirageWindowHook {
         sKeepFloatUntil.put(taskId, SystemClock.uptimeMillis() + KEEP_FLOAT_MS);
     }
 
+    /**
+     * 让某个任务的悬浮球条目在指定时间窗内躲过系统删除。
+     * 坞窗卡片打开/收起小窗时系统会尝试 removeFloatHandle，把它压住，
+     * 收起时就不用重建条目（重建要走快照+图标，是 UI 线程上的重活，会卡）。
+     */
+    static void keepFloatEntry(int taskId, long ms) {
+        if (taskId < 0) return;
+        sKeepFloatUntil.put(taskId, SystemClock.uptimeMillis() + ms);
+    }
+
+    /**
+     * 用户显式清除（坞窗「清除」/「取消运行」）时由 MainHook 调进来：
+     * 撤销这个任务的保留窗口，并打上「用户清除」标记。
+     * 之后 shouldKeepFloat 对它一律放行（官方 removeFloatHandle 不再被吃掉），
+     * CardZoom 收起时也不会再把条目补回，进程可以干净退掉。
+     */
+    static void markUserRemove(int taskId) {
+        if (taskId < 0) return;
+        sKeepFloatUntil.remove(taskId);
+        sUserRemoved.add(taskId);
+        XposedBridge.log(TAG + " user remove marked taskId=" + taskId);
+    }
+
+    /**
+     * 撤销保留窗口：点击坞窗卡片要「恢复成自由小窗」时由 MainHook 调进来。
+     *
+     * <p>恢复走的是官方入口，官方会把自己的悬浮球条目删掉（球要消失）；
+     * 而坞窗收起时刚调过 keepFloatEntry(5000)，不撤掉这道闸，
+     * 官方那次 removeFloatHandle 会被 shouldKeepFloat 压住，
+     * 结果就是窗口恢复了、悬浮球还挂在屏边（这就是「球没消失」的直接原因）。</p>
+     */
+    static void clearKeepFloatEntry(int taskId) {
+        if (taskId < 0) return;
+        if (sKeepFloatUntil.remove(taskId) != null) {
+            XposedBridge.log(TAG + " keep float window cancelled taskId=" + taskId);
+        }
+    }
+
+    /** 这个任务是否已被用户显式清除：CardZoom 收起时据此跳过补回/退出小窗。 */
+    static boolean isUserRemoved(int taskId) {
+        return taskId >= 0 && sUserRemoved.contains(taskId);
+    }
+
+    /** 任务重新被正常使用（坞窗再次展开它）时清掉清除标记，进入新一轮生命周期。 */
+    static void clearUserRemoved(int taskId) {
+        if (taskId < 0) return;
+        if (sUserRemoved.remove(taskId)) {
+            XposedBridge.log(TAG + " user remove mark cleared taskId=" + taskId);
+        }
+    }
+
     private static void attachDisplay(int taskId, int displayId) {
         if (taskId < 0 || displayId <= 0) return;
         sDisplays.put(taskId, displayId);
@@ -710,6 +763,7 @@ final class MirageWindowHook {
             Integer displayId = sDisplays.remove(taskId);
             sHangUpTasks.remove(taskId);
             sKeepFloatUntil.remove(taskId);
+            sUserRemoved.remove(taskId);
             XposedBridge.log(TAG + " reap dead taskId=" + taskId + " displayId=" + displayId);
             if (displayId != null) releaseAfterRestore(displayId.intValue());
         }
@@ -745,6 +799,7 @@ final class MirageWindowHook {
         if (taskId < 0) return 0;
         sHangUpTasks.remove(taskId);
         sKeepFloatUntil.remove(taskId);
+        sUserRemoved.remove(taskId);
         return takeDisplay(taskId);
     }
 
@@ -757,6 +812,7 @@ final class MirageWindowHook {
             sDisplays.remove(task);
             sHangUpTasks.remove(task);
             sKeepFloatUntil.remove(task);
+            sUserRemoved.remove(task);
         }
         forgetDisplay(displayId);
         if (!tasks.isEmpty()) {
@@ -779,6 +835,7 @@ final class MirageWindowHook {
             sDisplays.clear();
             sHangUpTasks.clear();
             sKeepFloatUntil.clear();
+            sUserRemoved.clear();
             if (count > 0) {
                 XposedBridge.log(TAG + " stacks moved back, cleared " + count + " task(s), no task list");
             }
@@ -788,6 +845,7 @@ final class MirageWindowHook {
         for (Integer taskId : moved) {
             if (sDisplays.remove(taskId) != null || sHangUpTasks.remove(taskId)) {
                 sKeepFloatUntil.remove(taskId);
+                sUserRemoved.remove(taskId);
                 cleared++;
             }
         }
@@ -831,6 +889,16 @@ final class MirageWindowHook {
         }
         boolean keep;
         if (argTaskId >= 0) {
+            // 用户显式清除过的任务无条件放行，官方删除必须生效（清除按钮）。
+            // 注意：这里不能顺手把标记清掉——清除按钮的 removeFloatHandle 之后
+            // 马上跟着 removeFloatDock -> CardZoom.leaveCard，那个时刻还要靠这个
+            // 标记跳过「补回条目」，一消费掉就会把刚删掉的条目又 add 回来。
+            if (sUserRemoved.contains(argTaskId)) {
+                keep = false;
+                XposedBridge.log(TAG + " keep float check taskId=" + argTaskId
+                        + " keep=" + keep + " userRemoved=true args=" + describeArgs(args));
+                return keep;
+            }
             // 挂起期间浮标必须常驻：本机宿主在贴边 5 秒后还会再删一次，
             // 只靠 LuckyTool 的 2.8 秒窗口压不住，结果就是后台还在、浮标没了
             // （日志：keep float check taskId=20938 keep=false hangUp=true）。

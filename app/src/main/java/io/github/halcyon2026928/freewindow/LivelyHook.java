@@ -490,7 +490,8 @@ public final class LivelyHook {
                 float dx = (w - dw) * 0.5f;
                 float dy = (h - dh) * 0.5f;
                 Path clip = new Path();
-                float radius = 12f * density;
+                // 快照绘制按官方卡片圆角裁边（mItemRadius = 35dp）。
+                float radius = density * MainHook.CARD_ITEM_CORNER_DP;
                 RectF frame = fill ? new RectF(0, 0, w, h) : new RectF(dx, dy, dx + dw, dy + dh);
                 clip.addRoundRect(frame, radius, radius,
                         Path.Direction.CW);
@@ -513,7 +514,9 @@ public final class LivelyHook {
     public static ImageView createPreview(Context ctx, Object floatHandleInfo, ClassLoader cl) {
         final ImageView preview = new ImageView(ctx);
         preview.setScaleType(ImageView.ScaleType.FIT_CENTER);
-        final float radius = dp(ctx, 12);
+        // 快照 view 的圆角照官方口径：mItemRadius（35dp），和 SurfaceView 那三层同值。
+        final float radius = ctx.getResources().getDisplayMetrics().density
+                * MainHook.CARD_ITEM_CORNER_DP;
         GradientDrawable bg = new GradientDrawable();
         // 完全透明：画面没铺满时不再露出灰底，直接透出坞窗本身（#E5E5E5）的浅色。
         // 圆角仍由下面 outline + clipToOutline 保证，不依赖这个背景。

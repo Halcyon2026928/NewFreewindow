@@ -27,7 +27,48 @@ public final class XposedBridge {
         }
     }
 
+    /** 取证日志文件：system_server 侧写 /data/system/freewindow_journal.log，adb 可直接 cat。 */
+    private static java.io.FileOutputStream sJournal;
+    private static final java.text.SimpleDateFormat JOURNAL_FMT =
+            new java.text.SimpleDateFormat("MM-dd HH:mm:ss.SSS");
+    private static final long JOURNAL_MAX = 6L * 1024 * 1024;
+
+    /**
+     * 现代 API 的 api.log 只写进 LSPosed 自己的日志（logcat 抓不到），排查实时画面这种
+     * 时序问题很不方便。这里把带「灵动坞OS」标记的日志再同步落一份到 /data/system，
+     * adb shell 有读权限，可以随抓随看。
+     */
+    private static synchronized void journal(String msg) {
+        if (msg == null || !msg.contains("灵动坞OS")) return;
+        try {
+            java.io.File f = new java.io.File("/data/system/freewindow_journal.log");
+            if (sJournal == null || f.length() > JOURNAL_MAX) {
+                if (sJournal != null) {
+                    try { sJournal.close(); } catch (Throwable ignored) { }
+                    sJournal = null;
+                }
+                if (f.length() > JOURNAL_MAX) {
+                    java.io.File old = new java.io.File("/data/system/freewindow_journal.old.log");
+                    if (old.exists()) old.delete();
+                    f.renameTo(old);
+                }
+                sJournal = new java.io.FileOutputStream(f, true);
+                try {
+                    android.system.Os.chmod(f.getAbsolutePath(), 0644);
+                } catch (Throwable ignored) {
+                }
+            }
+            sJournal.write((JOURNAL_FMT.format(new java.util.Date())
+                    + " " + msg + "\n").getBytes());
+            sJournal.flush();
+        } catch (Throwable t) {
+            try { if (sJournal != null) sJournal.close(); } catch (Throwable ignored) { }
+            sJournal = null;
+        }
+    }
+
     public static void log(String msg) {
+        journal(msg);
         XposedInterface api = sApi;
         if (api != null) {
             try {

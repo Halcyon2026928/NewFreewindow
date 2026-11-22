@@ -20,6 +20,9 @@ public final class XSharedPreferences {
     private final String prefFileName;
     private final Map<String, Object> values = new HashMap<>();
 
+    /** 上一次打印读取失败日志的时间：失败很频繁时只打一次，避免刷爆 logcat 把关键日志顶掉。 */
+    private static long sLastFailLogAt = 0L;
+
     public XSharedPreferences(String packageName, String prefFileName) {
         this.packageName = packageName;
         this.prefFileName = prefFileName;
@@ -111,7 +114,11 @@ public final class XSharedPreferences {
             }
             return !values.isEmpty();
         } catch (Throwable t) {
-            XposedBridge.log("XSharedPreferences read fail: " + file + " -> " + t);
+            long now = android.os.SystemClock.uptimeMillis();
+            if (now - sLastFailLogAt > 30000L) {
+                sLastFailLogAt = now;
+                XposedBridge.log("XSharedPreferences read fail: " + file + " -> " + t);
+            }
             return false;
         } finally {
             if (in != null) {

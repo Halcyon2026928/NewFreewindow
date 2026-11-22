@@ -18,8 +18,13 @@
     <string name="keep_alive_title">贴边保活</string>
     <string name="keep_alive_desc">收成贴边浮标后应用不暂停、保持后台运行；下载和挂机不会中断，会略微增加耗电</string>
 
-    <string name="unlock_limit_title">解除最小化数量上限</string>
+    <string name="unlock_limit_title">解除最小化数量上限(需重启)</string>
     <string name="unlock_limit_desc">系统默认最多同时保留 2 个最小化应用，打开后放宽到 12 个（重启手机生效）</string>
+
+    <string name="group_free_window">自由小窗</string>
+    <string name="group_background">后台运行</string>
+    <string name="group_dock">灵动坞</string>
+    <string name="live_preview_title">实时画面</string>
 
     <string name="settings_hint">开关会记住你的选择，重启手机后保持上次状态。改开关后重新打开自由小窗即可生效</string>
 
