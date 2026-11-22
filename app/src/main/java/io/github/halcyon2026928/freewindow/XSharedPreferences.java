@@ -35,16 +35,35 @@ public final class XSharedPreferences {
 
     public void reload() {
         values.clear();
+        // 三个候选路径多数指向同一个文件，但也可能残留旧文件/旧目录：
+        // 取修改时间最新的那份，避免读到过期配置把开关覆盖回默认。
+        File newest = null;
         for (File f : candidateFiles()) {
-            if (parse(f)) {
-                return;
+            if (!f.exists() || !f.canRead()) continue;
+            if (newest == null || f.lastModified() >= newest.lastModified()) {
+                newest = f;
             }
+        }
+        if (newest != null) {
+            parse(newest);
         }
     }
 
+    /** 是否真的解析到了至少一个键。false 表示文件不存在/不可读/为空，此时不要拿默认值覆盖调用方的缓存。 */
+    public boolean hasData() {
+        return !values.isEmpty();
+    }
+
     public File getFile() {
-        File[] files = candidateFiles();
-        return files.length > 0 ? files[0] : new File("/data/user_de/0/" + packageName + "/shared_prefs/" + prefFileName + ".xml");
+        File newest = null;
+        for (File f : candidateFiles()) {
+            if (!f.exists()) continue;
+            if (newest == null || f.lastModified() >= newest.lastModified()) {
+                newest = f;
+            }
+        }
+        return newest != null ? newest
+                : new File("/data/user_de/0/" + packageName + "/shared_prefs/" + prefFileName + ".xml");
     }
 
     public boolean getBoolean(String key, boolean defValue) {
@@ -60,7 +79,8 @@ public final class XSharedPreferences {
 
     public String getString(String key, String defValue) {
         Object v = values.get(key);
-        return v instanceof String ? (String) v : defValue;
+        if (v instanceof String) return (String) v;
+        return v != null ? String.valueOf(v) : defValue;
     }
 
     public int getInt(String key, int defValue) {
@@ -79,9 +99,9 @@ public final class XSharedPreferences {
 
     private File[] candidateFiles() {
         String[] roots = new String[]{
-                "/data/user_de/0/" + packageName + "/shared_prefs/",
                 "/data/data/" + packageName + "/shared_prefs/",
-                "/data/user/0/" + packageName + "/shared_prefs/"
+                "/data/user/0/" + packageName + "/shared_prefs/",
+                "/data/user_de/0/" + packageName + "/shared_prefs/"
         };
         File[] out = new File[roots.length];
         for (int i = 0; i < roots.length; i++) {
@@ -90,6 +110,14 @@ public final class XSharedPreferences {
         return out;
     }
 
+    /**
+     * 解析 Android 的 SharedPreferences XML。
+     *
+     * <p>Android 写出来的 boolean / int / long / float 值放在属性里
+     * （{@code <boolean name="k" value="true" />}），只有 string 才是标签文本。
+     * 之前只处理文本节点，等于所有布尔开关都解析不出来、每次回落到调用方默认值——
+     * 表现就是「设置改完、退出模块 app 后台后开关恢复默认」。
+     */
     private boolean parse(File file) {
         FileInputStream in = null;
         try {
@@ -100,17 +128,30 @@ public final class XSharedPreferences {
             XmlPullParser parser = Xml.newPullParser();
             parser.setInput(in, "utf-8");
             String pendingName = null;
-            for (int type = parser.getEventType(); type != XmlPullParser.END_DOCUMENT;
-                 type = parser.next()) {
+            int type = parser.getEventType();
+            while (type != XmlPullParser.END_DOCUMENT) {
                 if (type == XmlPullParser.START_TAG) {
-                    pendingName = parser.getAttributeValue(null, "name");
-                } else if (type == XmlPullParser.TEXT && pendingName != null) {
-                    String text = parser.getText();
-                    if (text != null) {
-                        values.put(pendingName, text.trim());
+                    String tag = parser.getName();
+                    String name = parser.getAttributeValue(null, "name");
+                    String attr = parser.getAttributeValue(null, "value");
+                    if (name != null && attr != null) {
+                        values.put(name, typedValue(tag, attr));
+                        pendingName = null;
+                    } else {
+                        pendingName = name;
                     }
+                } else if (type == XmlPullParser.TEXT) {
+                    if (pendingName != null) {
+                        String text = parser.getText();
+                        if (text != null) {
+                            values.put(pendingName, text.trim());
+                        }
+                        pendingName = null;
+                    }
+                } else if (type == XmlPullParser.END_TAG) {
                     pendingName = null;
                 }
+                type = parser.next();
             }
             return !values.isEmpty();
         } catch (Throwable t) {
@@ -128,5 +169,16 @@ public final class XSharedPreferences {
                 }
             }
         }
+    }
+
+    private static Object typedValue(String tag, String raw) {
+        try {
+            if ("boolean".equals(tag)) return Boolean.parseBoolean(raw);
+            if ("int".equals(tag)) return Integer.parseInt(raw);
+            if ("long".equals(tag)) return Long.parseLong(raw);
+            if ("float".equals(tag)) return Float.parseFloat(raw);
+        } catch (Throwable ignored) {
+        }
+        return raw;
     }
 }

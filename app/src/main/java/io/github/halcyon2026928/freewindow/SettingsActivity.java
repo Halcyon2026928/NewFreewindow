@@ -482,6 +482,9 @@ public class SettingsActivity extends Activity {
 
     private void writePref(String key, boolean value) {
         ModulePrefs.get(this).edit().putBoolean(key, value).commit();
+        // commit 会重写 xml（权限回到 0600），必须马上放开成 world-readable，
+        // 否则模块 app 进程退出后 system_server 就读不到，开关表现为全部恢复默认。
+        ModulePrefs.makePrefsReadable(this);
     }
 
     /**

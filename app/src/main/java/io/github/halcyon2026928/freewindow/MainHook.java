@@ -236,7 +236,16 @@ public class MainHook implements IXposedHookLoadPackage {
         try {
             XSharedPreferences prefs = new XSharedPreferences(ModulePrefs.PKG, ModulePrefs.NAME);
             prefs.makeWorldReadable();
-            prefs.reload();
+            // 没解析到任何键（模块 app 被清理、文件权限没放开）时保持上次读到的值，
+            // 不能拿默认值覆盖——否则退出模块 app 后台后所有开关都会跳回默认。
+            if (!prefs.hasData()) {
+                XposedBridge.log(TAG + " config(xprefs empty, keep cached) -> hideBottomBar="
+                        + hideBottomBar + " hideThreeDot=" + hideThreeDot
+                        + " enableDock=" + enableDock
+                        + " unlockFloatLimit=" + unlockFloatLimit
+                        + " livePreview=" + livePreview);
+                return;
+            }
             hideBottomBar = prefs.getBoolean(KEY_HIDE_BOTTOM_BAR, true);
             hideThreeDot = prefs.getBoolean(KEY_HIDE_THREE_DOT, true);
             enableDock = prefs.getBoolean(KEY_ENABLE_DOCK, true);

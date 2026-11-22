@@ -1527,7 +1527,8 @@ final class FloatKeepAliveHook {
         sConfigReadAt = now;
         try {
             XSharedPreferences prefs = new XSharedPreferences(ModulePrefs.PKG, ModulePrefs.NAME);
-            prefs.reload();
+            // 读不到配置时保留上次的值，不要被默认值覆盖。
+            if (!prefs.hasData()) return sEnabled;
             sEnabled = prefs.getBoolean(KEY_KEEP_ALIVE, true);
         } catch (Throwable t) {
             // 读不到时保留上次的值（模块进程未启动/文件不可读）。
