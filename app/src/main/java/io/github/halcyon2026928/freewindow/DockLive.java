@@ -86,6 +86,12 @@ public final class DockLive {
             new java.util.HashMap<>();
     private static ClassLoader sClassLoader;
     private static boolean sScreenReceiverRegistered;
+    /**
+     * 坞窗 View 树所在线程的 Handler（卡片的 "android.ui" 线程）。
+     * 锁屏/解锁回调跑在 system 主线程，直接 removeView 会抛
+     * CalledFromWrongThreadException，热区就永远留在屏上 —— 必须 post 回这个线程。
+     */
+    private static volatile android.os.Handler sCardUiHandler;
     /** Prevent WMS transitions from pulling an attached live Task out of its card SurfaceView. */
     private static volatile boolean sSurfaceParentLockEnabled;
 
@@ -238,6 +244,40 @@ public final class DockLive {
         }
     }
 
+    /**
+     * 撤掉 FloatOpen 动画对任务层的 alpha 压制。
+     *
+     * 打开动画期间我们把这张 Task 层的 alpha 硬压成 0，等它被 reparent 进卡片才松手；
+     * 静态快照的卡从来没走到那一步，alpha 就一直停在 0。官方恢复接管时虽然可见请求变了，
+     * 但没人把 alpha 抬回来，屏幕上就是空的。挂载成功的卡走 detach 时会自己抬，
+     * 这里只服务「没挂上就要恢复」这一条。
+     */
+    private static void releaseAnimationAlphaHold(Slot slot) {
+        if (slot == null) return;
+        SurfaceControl taskSc = slot.animationTaskSurface;
+        SurfaceControl leash = slot.animationLeash;
+        slot.animationTaskSurface = null;
+        slot.animationLeash = null;
+        slot.alphaHoldLogged = false;
+        if (taskSc == null && leash == null) return;
+        try {
+            SurfaceControl.Transaction tx = new SurfaceControl.Transaction();
+            if (taskSc != null) {
+                txCall(tx, "setAlpha", taskSc, 1f);
+                txCall(tx, "show", taskSc);
+            }
+            if (leash != null) {
+                txCall(tx, "setAlpha", leash, 1f);
+                txCall(tx, "show", leash);
+            }
+            tx.apply();
+            XposedBridge.log(TAG + " animation alpha hold released taskId=" + slot.taskId
+                    + " task=" + taskSc + " leash=" + leash);
+        } catch (Throwable t) {
+            XposedBridge.log(TAG + " release alpha hold failed taskId=" + slot.taskId + ": " + t);
+        }
+    }
+
     /** Keep the temporary WMS Task surface hidden until the same surface is parented into its card. */
     static boolean shouldHoldAnimationTaskSurface(SurfaceControl surface) {
         Slot target = null;
@@ -320,7 +360,9 @@ public final class DockLive {
         if (pkg == null) return false;
         synchronized (sSlots) {
             for (Slot slot : sSlots) {
-                if (slot.attached && pkg.equals(slot.pkg)) return true;
+                // handedToRestore = 已经交给恢复流程，这一刻起就不能再当成卡片里的预览窗口：
+                // 否则恢复途中官方那次 relayout 会把「不可触摸」重新写到小窗上（只能上滑）。
+                if (slot.attached && !slot.handedToRestore && pkg.equals(slot.pkg)) return true;
             }
         }
         return false;
@@ -466,15 +508,9 @@ public final class DockLive {
         sSurfaceParentLockEnabled = true;
 
         final ClassLoader finalCl = cl != null ? cl : sClassLoader;
-        // 卡片贴到坞窗上之后才有真实屏幕矩形：延迟 300ms 开热区（静态快照态也开，
-        // 画面还没动起来时就能点）；卡片离开窗口立刻撤，避免任务还回 WMS 后这块还被挡着。
-        surfaceView.postDelayed(new Runnable() {
-            @Override
-            public void run() {
-                if (surfaceView.getWindowToken() == null) return;
-                showTouchPad(state);
-            }
-        }, 300L);
+        // 热区只在「实时画面真的挂上了」之后才有意义（见 applyLiveTransaction 里的 showTouchPad）。
+        // 静态快照阶段不预热：那时点卡片走 SurfaceView 自己的触摸回调就能恢复，多一块透明窗口
+        // 只会压住坞窗的按钮和滚动。
         surfaceView.addOnAttachStateChangeListener(new View.OnAttachStateChangeListener() {
             @Override
             public void onViewAttachedToWindow(View v) {
@@ -745,8 +781,11 @@ public final class DockLive {
         MainHook.setDockTouchable(false);
         for (Slot slot : slots) {
             slot.recoveryGeneration++;
-            if (slot.attached) detach(slot, sClassLoader, true, false);
         }
+        // 锁屏就走正常关闭坞窗那条路（和点坞窗外/Home 手势收起完全一致）：
+        // removeFloatDock → CardZoom.leaveCard 把任务收成迷你浮标 → finishRemoveDock。
+        // 这条路径平时收起后解锁是不会显示那块窗口的，所以锁屏也照它做。
+        MainHook.dismissDockForLock();
     }
 
     /** Re-fetch and reparent the current Task surface repeatedly as unlock finishes. */
@@ -825,6 +864,11 @@ public final class DockLive {
         target.handedToRestore = true;
         // 点卡片恢复走官方入口，它读的是浮标 info 里的几何；先把卡片几何还回去
         restoreFloatGeometry(target, sClassLoader);
+        // 卡片里的窗口被锁过「不可触摸」，恢复前必须解开，否则小窗拖不动点不了、只能上滑关
+        MainHook.clearPreviewTouchBlock(target.pkg);
+        // 静态快照卡和实时卡走完全同一条恢复路径：撤掉打开动画的 alpha=0 压制，
+        // 再还层（hide + reparent 回主屏），官方恢复接管时自己 show。
+        releaseAnimationAlphaHold(target);
         // 照第三版（无闪大窗版本）的口径：还层时把任务层藏掉（hideLayer=true），
         // 官方动画接管时才会把它 show 出来。层隐藏期间屏幕上没有任何任务帧，
         // 也就不存在「还层到动画接管之间一闪而过的大窗」。
@@ -832,6 +876,29 @@ public final class DockLive {
         synchronized (sSlots) {
             sSlots.remove(target);
         }
+    }
+
+    /**
+     * 坞窗里的任务被外部正常打开（桌面图标 / 最近任务）：停止实时画面、把这张卡从坞窗摘掉。
+     * 这时任务层已经被系统拉到前台，不能还层也不能 hide，只做登记清理。
+     */
+    static void onTaskExternallyOpened(int taskId) {
+        Slot target = null;
+        synchronized (sSlots) {
+            for (Slot slot : sSlots) {
+                if (slot.taskId == taskId) {
+                    target = slot;
+                    break;
+                }
+            }
+            if (target != null) sSlots.remove(target);
+        }
+        if (target == null) return;
+        target.handedToRestore = true;
+        hideTouchPad(target);
+        target.touchPad = null;
+        target.attached = false;
+        XposedBridge.log(TAG + " task opened externally, live slot released taskId=" + taskId);
     }
 
     /** 单个卡片退出实时画面（用于"取消运行"）：还原图层并回到隐藏态。 */
@@ -1014,14 +1081,10 @@ public final class DockLive {
                 setVisibleRequested(task, true);
                 slot.attached = true;
                 resumeTask(task);
-                // 实时层已经顶上来了，静态快照就没必要占着位置（也不该盖在三点菜单上）
-                final ImageView stillView = slot.still;
-                slot.surfaceView.post(new Runnable() {
-                    @Override
-                    public void run() {
-                        if (stillView != null) stillView.setVisibility(View.GONE);
-                    }
-                });
+                // 底下的静态快照不撤：它是这张卡的永久底图。实时层正常时把它整个盖住，
+                // 一旦实时层重载/掉帧，露出来的是这张图，而不是一块空白。
+                // 它和 SurfaceView 是同一个 FrameLayout 里先加的那个，天然垫在实时层下面，
+                // 不会盖住画面，也不影响三点菜单。
                 XposedBridge.log(TAG + " live attached taskId=" + slot.taskId
                         + " pkg=" + slot.pkg + " mode=reparent");
                 MainHook.enforcePreviewUnfocusable(slot.pkg);
@@ -1168,10 +1231,9 @@ public final class DockLive {
     /**
      * 坞窗卡片的 Background 子层（framework 的 "Background for ..." 纯色层）。
      *
-     * <p>官方 1059-1065 会给它 setAlpha(0.98/0.95) + setColor(mBgColor) + show 当卡片底色，
-     * 这里照同一口径：alpha 拉满 + show，颜色由 setResizeBackgroundColor(bgColor) 提供
-     * （浅色 #E5E5E5 / 深色 #1E1E1E，和坞窗面板同色）。
-     * 用户实测放行这层后卡片效果更好，所以保留。</p>
+     * <p>官方 1059-1065 会给它 setAlpha + setColor + show 当卡片底色。这里反过来：这层是
+     * SurfaceView 自建的矩形子层，不吃父层圆角，只要它露面就是一块直角（锁屏重建后尤其明显），
+     * 卡面不需要它，直接 hide。MainHook 在每次事务提交前还会再兜一次 hide。</p>
      */
     private static void applyBackgroundLayer(Slot slot, SurfaceControl.Transaction tx) {
         try {
@@ -1181,18 +1243,47 @@ public final class DockLive {
             if (!(bgObj instanceof SurfaceControl)) return;
             SurfaceControl bg = (SurfaceControl) bgObj;
             if (!bg.isValid()) return;
-            // 这层是 SurfaceView 的纯色子层，不会自动吃父层圆角：必须和卡片同一个基础参数
-            // （slot.cornerPx，即官方 mItemRadius 口径），否则放行后它的四个角是直角，
-            // 会在画面四角露出来。BLAST 子层拿不到句柄，但它跟随父层几何裁剪，不用单独设。
-            txCall(tx, "setCornerRadius", bg, slot.cornerPx);
-            txCall(tx, "setAlpha", bg, 1f);
-            txCall(tx, "show", bg);
+            txCall(tx, "hide", bg);
         } catch (Throwable t) {
             XposedBridge.log(TAG + " background layer unavailable: " + t.getMessage());
         }
     }
 
     // ==================== 官方 MySurfaceView 的滚动裁剪（820-858） ====================
+
+    /**
+     * 每次 SurfaceControl 事务提交前，把坞窗卡片的 "Background for ..." 子层一律隐藏。
+     *
+     * <p>这层是 SurfaceView 自建的矩形背景子层，不吃父层圆角，锁屏/解锁重新 attach 时官方
+     * 会重新 applyBackgroundLayer 把它 show 出来（3820 上还会一直挂着），露出的就是那个直角块。
+     * 它本来就不该出现在卡面上，所以在唯一合流点——事务提交前——统一 hide 掉：
+     * 谁在哪条路径把它 show 出来都无效，提交出去时它一定是隐藏的。</p>
+     */
+    static void ensureBackgroundHidden(SurfaceControl.Transaction tx) {
+        java.util.List<Slot> slots;
+        synchronized (sSlots) {
+            if (sSlots.isEmpty()) return;
+            slots = new java.util.ArrayList<>(sSlots);
+        }
+        java.lang.reflect.Field f;
+        try {
+            f = SurfaceView.class.getDeclaredField("mBackgroundControl");
+            f.setAccessible(true);
+        } catch (Throwable t) {
+            return;
+        }
+        for (Slot slot : slots) {
+            if (slot == null || slot.surfaceView == null) continue;
+            try {
+                Object obj = f.get(slot.surfaceView);
+                if (!(obj instanceof SurfaceControl)) continue;
+                SurfaceControl bg = (SurfaceControl) obj;
+                if (!bg.isValid()) continue;
+                txCall(tx, "hide", bg);
+            } catch (Throwable ignored) {
+            }
+        }
+    }
 
     /** 这个 SurfaceView 是否是坞窗实时卡片（MainHook 的裁剪遍历靠它分流）。 */
     static boolean isLiveSurfaceView(SurfaceView view) {
@@ -1206,6 +1297,36 @@ public final class DockLive {
             }
         }
         return null;
+    }
+
+    /**
+     * 这个 SurfaceControl 是否是坞窗卡片的 Background 子层（mBackgroundControl）。
+     *
+     * <p>MainHook 用它拦截官方在这层上的 show：只要拦住 show，它就一次都露不出来，
+     * 而不是"show 了再被压回去"（后者会闪一帧）。</p>
+     */
+    static boolean isLiveBackgroundControl(SurfaceControl sc) {
+        if (sc == null) return false;
+        java.util.List<Slot> slots;
+        synchronized (sSlots) {
+            if (sSlots.isEmpty()) return false;
+            slots = new java.util.ArrayList<>(sSlots);
+        }
+        java.lang.reflect.Field f;
+        try {
+            f = SurfaceView.class.getDeclaredField("mBackgroundControl");
+            f.setAccessible(true);
+        } catch (Throwable t) {
+            return false;
+        }
+        for (Slot slot : slots) {
+            if (slot == null || slot.surfaceView == null) continue;
+            try {
+                if (sc == f.get(slot.surfaceView)) return true;
+            } catch (Throwable ignored) {
+            }
+        }
+        return false;
     }
 
     /**
@@ -1569,6 +1690,8 @@ public final class DockLive {
         if (slot == null || slot.taskId <= 0) return;
         // 静态画面模式：没有实时层要挡，热区也不该出现，否则会把坞窗的上下滑动吃掉。
         if (!sLivePreviewEnabled) return;
+        android.os.Handler uiHandler = slot.surfaceView.getHandler();
+        if (uiHandler != null) sCardUiHandler = uiHandler;
         try {
             if (slot.touchPad != null) {
                 // 已经挂着：只把位置贴一次，不重复加窗口。
@@ -1576,6 +1699,8 @@ public final class DockLive {
                 return;
             }
             Rect card = cardScreenRect(slot);
+            shrinkRect(card, PAD_SHRINK);
+            clipPadToScrollArea(card);
             if (card.width() <= 0 || card.height() <= 0
                     || !isPadRectOnScreen(card, slot.surfaceView)) return;
             Context ctx = slot.surfaceView.getContext();
@@ -1601,6 +1726,20 @@ public final class DockLive {
                             if (Math.abs(event.getX() - downX) < 40f
                                     && Math.abs(event.getY() - downY) < 40f) {
                                 XposedBridge.log(TAG + " pad click taskId=" + taskId);
+                                // 先把自己这块透明窗口同步撤掉：它压在恢复出来的小窗上，
+                                // 留着就会把小窗的触摸全吃掉（表现为小窗拖不动、点不了，只能上滑关）。
+                                // 这里已经在它自己的 UI 线程，直接 removeViewImmediate。
+                                slot.touchPad = null;
+                                slot.touchPadLp = null;
+                                slot.padWm = null;
+                                slot.padRect.setEmpty();
+                                try {
+                                    wm.removeViewImmediate(v);
+                                    XposedBridge.log(TAG + " touch pad removed on click taskId=" + taskId);
+                                } catch (Throwable t) {
+                                    XposedBridge.log(TAG + " touch pad remove on click failed taskId="
+                                            + taskId + ": " + t);
+                                }
                                 fireRestore(taskId);
                             }
                             return true;
@@ -1645,6 +1784,8 @@ public final class DockLive {
         try {
             if (slot.touchPad == null || slot.touchPadLp == null || slot.padWm == null) return;
             Rect card = cardScreenRect(slot);
+            shrinkRect(card, PAD_SHRINK);
+            clipPadToScrollArea(card);
             if (card.width() <= 0 || card.height() <= 0
                     || !isPadRectOnScreen(card, slot.surfaceView)) {
                 hideTouchPad(slot);
@@ -1663,6 +1804,41 @@ public final class DockLive {
         }
     }
 
+    /** 热区相对卡片画面再缩 20%（四周各收 10%），点击恢复只认画面中间那块。 */
+    private static final float PAD_SHRINK = 0.8f;
+
+    /** 按中心等比缩放矩形。 */
+    private static void shrinkRect(Rect r, float factor) {
+        if (r == null || factor <= 0f || factor >= 1f) return;
+        int dx = (int) ((r.width() * (1f - factor)) / 2f);
+        int dy = (int) ((r.height() * (1f - factor)) / 2f);
+        r.inset(dx, dy);
+    }
+
+    /**
+     * 把热区矩形裁到坞窗滚动区的可视范围。
+     *
+     * 卡片画面是任务层/独立 surface，热区是压在坞窗之上的透明系统窗口——两者都比坞窗
+     * View 树高一层，坞窗底部的「清除」按钮抢不到 DOWN。多张卡片时第二张卡的热区会一路
+     * 铺到按钮上，点按钮实际点到卡片（表现为"清不掉/只清一张"）。
+     * 所以热区只允许覆盖滚动区可见部分，底部按钮区域永远留给坞窗 View。
+     */
+    private static void clipPadToScrollArea(Rect r) {
+        if (r == null) return;
+        android.widget.ScrollView sv = MainHook.dockScrollView();
+        if (sv == null || sv.getHeight() <= 0) return;
+        int[] loc = new int[2];
+        try {
+            sv.getLocationOnScreen(loc);
+        } catch (Throwable t) {
+            return;
+        }
+        int visibleTop = loc[1];
+        int visibleBottom = loc[1] + sv.getHeight();
+        if (r.top < visibleTop) r.top = visibleTop;
+        if (r.bottom > visibleBottom) r.bottom = visibleBottom;
+    }
+
     /** 矩形是否还有一部分在屏幕内（完全滚出去就没必要留着挡手）。 */
     private static boolean isPadRectOnScreen(Rect r, View anchor) {
         if (r == null || r.width() <= 0 || r.height() <= 0) return false;
@@ -1677,18 +1853,30 @@ public final class DockLive {
 
     private static void hideTouchPad(Slot slot) {
         if (slot == null) return;
-        View pad = slot.touchPad;
-        WindowManager wm = slot.padWm;
+        final View pad = slot.touchPad;
+        final WindowManager wm = slot.padWm;
+        final int taskId = slot.taskId;
         slot.touchPad = null;
         slot.touchPadLp = null;
         slot.padWm = null;
         slot.padRect.setEmpty();
         if (pad == null || wm == null) return;
-        try {
-            wm.removeViewImmediate(pad);
-            XposedBridge.log(TAG + " touch pad removed taskId=" + slot.taskId);
-        } catch (Throwable t) {
-            XposedBridge.log(TAG + " touch pad remove failed taskId=" + slot.taskId + ": " + t);
+        final Runnable remove = new Runnable() {
+            @Override public void run() {
+                try {
+                    wm.removeViewImmediate(pad);
+                    XposedBridge.log(TAG + " touch pad removed taskId=" + taskId);
+                } catch (Throwable t) {
+                    XposedBridge.log(TAG + " touch pad remove failed taskId=" + taskId + ": " + t);
+                }
+            }
+        };
+        android.os.Handler h = slot.surfaceView.getHandler();
+        if (h == null) h = sCardUiHandler;
+        if (h != null) {
+            h.post(remove);
+        } else if (!slot.surfaceView.post(remove)) {
+            remove.run();
         }
     }
 
@@ -1840,22 +2028,25 @@ public final class DockLive {
         try {
             Object task = findTask(slot.taskId, cl);
             if (task == null) return;
-            if (isVisible(task)) {
-                MirageWindowHook.keepFloatEntry(slot.taskId, 5000);
-                ensureFloatEntry(slot, task, cl);
-                Object fwms = flexibleService(cl);
-                Object controller = fwms == null ? null
-                        : XposedHelpers.getObjectField(fwms, "mFlexibleTaskController");
-                if (controller == null) {
-                    XposedBridge.log(TAG + " collapse skipped: controller null taskId=" + slot.taskId);
-                    return;
-                }
-                synchronized (globalLock(task)) {
-                    XposedHelpers.callMethod(controller, "exitFlexibleTask",
-                            task, true, EXIT_REASON_TO_FLOAT, 0);
-                }
-                XposedBridge.log(TAG + " collapseToHandle ok taskId=" + slot.taskId);
+            // 不能用 isVisible(task) 当门：锁屏收起那一刻屏幕已黑、任务被判不可见，
+            // 老代码于是整段跳过 exitFlexibleTask，任务留在 flexible 状态没进浮标，
+            // 解锁时系统把它还原成可见大窗口。收起要按「任务在不在」来判断。
+            boolean taskVisible = isVisible(task);
+            XposedBridge.log(TAG + " collapseToHandle visible=" + taskVisible + " taskId=" + slot.taskId);
+            MirageWindowHook.keepFloatEntry(slot.taskId, 5000);
+            ensureFloatEntry(slot, task, cl);
+            Object fwms = flexibleService(cl);
+            Object controller = fwms == null ? null
+                    : XposedHelpers.getObjectField(fwms, "mFlexibleTaskController");
+            if (controller == null) {
+                XposedBridge.log(TAG + " collapse skipped: controller null taskId=" + slot.taskId);
+                return;
             }
+            synchronized (globalLock(task)) {
+                XposedHelpers.callMethod(controller, "exitFlexibleTask",
+                        task, true, EXIT_REASON_TO_FLOAT, 0);
+            }
+            XposedBridge.log(TAG + " collapseToHandle ok taskId=" + slot.taskId);
             // 兜底：无论走出哪条路，都别再保持「可见请求」
             setVisibleRequested(task, false);
         } catch (Throwable t) {

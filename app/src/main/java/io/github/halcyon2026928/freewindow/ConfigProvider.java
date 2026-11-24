@@ -43,6 +43,9 @@ public class ConfigProvider extends ContentProvider {
         // 主题模式：0=跟随系统，1=浅色，2=深色。坞窗在 system 进程里按它配色。
         c.addRow(new Object[]{SettingsActivity.KEY_THEME_MODE,
                 prefs.getInt(SettingsActivity.KEY_THEME_MODE, SettingsActivity.THEME_FOLLOW_SYSTEM)});
+        // 被查询即顺手推一份落盘：system_server 里那份文件是开机恢复的唯一来源，
+        // 这样即便用户改完设置就直接关掉 app，下次开机也能拿到最新的值。
+        SettingsActivity.pushSettings(getContext());
         return c;
     }
 

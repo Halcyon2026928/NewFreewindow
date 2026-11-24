@@ -64,6 +64,19 @@ public class MainHook implements IXposedHookLoadPackage {
      *  读取失败则沿用上次成功读取的配置（缓存兜底）。 */
     private boolean hideBottomBar = true;
     private boolean hideThreeDot = true;
+    /** 落盘文件是否已经用第一次读到的有效配置自举过。 */
+    private static boolean sStoreBootstrapped;
+
+    /** 「音量 + 电源」截屏组合键的判定窗口，AOSP 的 ScreenshotChord 就是这个量级。 */
+    private static final long SCREENSHOT_CHORD_MS = 300L;
+
+    /** 音量键接管里延迟执行「调音量 + 弹条」的 handler。 */
+    private static final android.os.Handler sVolumeHandler =
+            new android.os.Handler(android.os.Looper.getMainLooper());
+
+    /** 最近一次电源键按下时刻（uptimeMillis），配合截屏组合键判定。 */
+    private static volatile long sLastPowerDownAt;
+
     private boolean enableDock = true;
     /** 解除数量上限开关；关掉时上限 hook 一个都不装，系统保持官方 2 个。 */
     private boolean unlockFloatLimit = true;
@@ -82,6 +95,8 @@ public class MainHook implements IXposedHookLoadPackage {
     /** 上一次画到悬浮球上的应用（记忆）：恢复某个应用后列表清空时用它把图标补回去。 */
     private static String sLastHandlePkg;
     private static int sLastHandleUserId;
+    /** 模块实例（system_server 里只 new 一次），供静态入口回调坞窗收起的实例方法。 */
+    private static MainHook sInstance;
     /** 坞窗容器（全局唯一）。 */
     private static FrameLayout sDockContainer;
     /** 坞窗外面那层全屏透明遮罩：专门吃掉「点坞窗外」那一下，避免穿透到桌面图标。 */
@@ -100,6 +115,23 @@ public class MainHook implements IXposedHookLoadPackage {
     /** 已经挂过手势回调的类名，防止两条路径摸到同一个类重复挂。 */
     private static final java.util.Set<String> sGestureCallbackClasses =
             java.util.Collections.synchronizedSet(new java.util.HashSet<String>());
+
+    /**
+     * 边缘手势的方向跟踪。
+     * <p>ColorOS 在贴边起手时就会把这次滑动报成返回手势（哪怕用户是竖直上滑）：
+     * 日志里手指落点 x=88.9（左侧 96px 热区）、位移是竖直的，系统照样走
+     * {@code startBackNavigation}，于是坞窗被当成"返回收起"关掉。这里记下起手点与位移方向，
+     * 让 {@code startBackNavigation} 只有横向滑动时才收起坞窗，竖直的一律吞掉且不动坞窗。</p>
+     */
+    private static volatile float sGestureDownX;
+    private static volatile float sGestureDownY;
+    private static volatile boolean sGestureTracking;
+    private static volatile boolean sGestureHorizontal;
+    private static volatile long sGestureEndedAt;
+    /** 手势抬手到系统真正起 Back 转场之间留的归属窗口（这是手势归属判断，不是延迟执行）。 */
+    private static final long GESTURE_HANDOFF_MS = 250L;
+    /** 已经装过 onPointerEvent 方向跟踪的 listener 类，避免重复挂。 */
+    private static final java.util.Set<String> sGestureDirectionClasses = new java.util.HashSet<>();
 
     /**
      * 官方首开动画里那块纯色底板（FlexibleFloatHandleAnimationSpec.mMaskSurface）。
@@ -158,6 +190,8 @@ public class MainHook implements IXposedHookLoadPackage {
     private static final boolean FIXED_PREVIEW_ASPECT = true;
     private static final float PREVIEW_ASPECT_PORTRAIT = 16f / 9f;    // 1.7778
     private static final float PREVIEW_ASPECT_LANDSCAPE = 13f / 9f;   // 1.4444
+    /** 卡片画面整体缩放：0.9 = 比卡片框小 10%（热区另按 PAD_SHRINK 再缩）。 */
+    private static final float PREVIEW_SHRINK = 0.9f;
     /**
      * 横屏应用单独一条：它的画面本身是横的，按 9:16（高:宽 = 0.5625）建一个矮框，
      * 画面正好横向铺满，不会像竖框那样把横屏内容切成一条竖缝。
@@ -168,6 +202,7 @@ public class MainHook implements IXposedHookLoadPackage {
 
     @Override
     public void handleLoadPackage(XC_LoadPackage.LoadPackageParam lpparam) {
+        sInstance = this;
         if ("android".equals(lpparam.packageName)) {
             sClassLoader = lpparam.classLoader;
             hookSystemServer(lpparam);
@@ -216,6 +251,7 @@ public class MainHook implements IXposedHookLoadPackage {
                     configLoaded = true;
                     // 交给 DockLive：卡片建的时候据此决定挂不挂实时层、开不开热区。
                     DockLive.setLivePreviewEnabled(livePreview);
+                    bootstrapStoreOnce();
                     XposedBridge.log(TAG + " config(provider) -> hideBottomBar=" + hideBottomBar
                             + " hideThreeDot=" + hideThreeDot
                             + " enableDock=" + enableDock
@@ -254,6 +290,7 @@ public class MainHook implements IXposedHookLoadPackage {
             livePreview = prefs.getBoolean(KEY_LIVE_PREVIEW, true);
             configLoaded = true;
             DockLive.setLivePreviewEnabled(livePreview);
+            bootstrapStoreOnce();
             XposedBridge.log(TAG + " config(xprefs readable=" + prefs.getFile().canRead()
                     + ") -> hideBottomBar=" + hideBottomBar
                     + " hideThreeDot=" + hideThreeDot
@@ -264,9 +301,80 @@ public class MainHook implements IXposedHookLoadPackage {
         }
     }
 
+    /**
+     * 应用 system_server 落盘里的那份设置。
+     * 开机 restore 和 app 每次推送都走这里，两处口径必须一致。
+     */
+    void applyConfigFromStore(java.util.Map<String, String> map) {
+        if (map == null || map.isEmpty()) return;
+        hideBottomBar = boolOf(map, KEY_HIDE_BOTTOM_BAR, hideBottomBar);
+        hideThreeDot = boolOf(map, KEY_HIDE_THREE_DOT, hideThreeDot);
+        enableDock = boolOf(map, KEY_ENABLE_DOCK, enableDock);
+        unlockFloatLimit = boolOf(map, KEY_UNLOCK_LIMIT, unlockFloatLimit);
+        livePreview = boolOf(map, KEY_LIVE_PREVIEW, livePreview);
+        themeMode = intOf(map, KEY_THEME_MODE, themeMode);
+        configLoaded = true;
+        DockLive.setLivePreviewEnabled(livePreview);
+        XposedBridge.log(TAG + " config(store) -> hideBottomBar=" + hideBottomBar
+                + " hideThreeDot=" + hideThreeDot
+                + " enableDock=" + enableDock
+                + " unlockFloatLimit=" + unlockFloatLimit
+                + " livePreview=" + livePreview
+                + " themeMode=" + themeMode);
+    }
+
+    /** 当前开关快照，交给 SettingsStore 落盘用。 */
+    java.util.Map<String, String> configToMap() {
+        java.util.Map<String, String> map = new java.util.LinkedHashMap<>();
+        map.put(KEY_HIDE_BOTTOM_BAR, String.valueOf(hideBottomBar));
+        map.put(KEY_HIDE_THREE_DOT, String.valueOf(hideThreeDot));
+        map.put(KEY_ENABLE_DOCK, String.valueOf(enableDock));
+        map.put(KEY_UNLOCK_LIMIT, String.valueOf(unlockFloatLimit));
+        map.put(KEY_LIVE_PREVIEW, String.valueOf(livePreview));
+        map.put(KEY_THEME_MODE, String.valueOf(themeMode));
+        return map;
+    }
+
+    /**
+     * 首次自举：开机时文件里还没有东西，等 provider / xprefs 第一次读到有效值，
+     * 立刻把这份值写进文件，下次开机就有得读了。只做一次。
+     */
+    static void bootstrapStoreOnce() {
+        if (sStoreBootstrapped) return;
+        sStoreBootstrapped = true;
+        try {
+            SettingsStore.saveCurrent();
+        } catch (Throwable t) {
+            XposedBridge.log(TAG + " bootstrap settings store failed: " + t.getMessage());
+        }
+    }
+
+    private static boolean boolOf(java.util.Map<String, String> map, String key, boolean def) {
+        String value = map.get(key);
+        if (value == null) return def;
+        return "true".equalsIgnoreCase(value) || "1".equals(value);
+    }
+
+    private static int intOf(java.util.Map<String, String> map, String key, int def) {
+        String value = map.get(key);
+        if (value == null) return def;
+        try {
+            return Integer.parseInt(value.trim());
+        } catch (Throwable t) {
+            return def;
+        }
+    }
+
     private void hookSystemServer(XC_LoadPackage.LoadPackageParam lpparam) {
         // 先把开关读进来：数量上限的 hook 装不装由 unlock_float_limit 决定，
         // 所以必须在装机（重启）那一刻就知道开关状态。
+        // system_server 落盘的那份优先：开机时 app 进程还没起，xprefs/provider 都读不到，
+        // 只有这份文件能让开关保持用户上次的选择。
+        try {
+            SettingsStore.install(this, lpparam.classLoader);
+        } catch (Throwable t) {
+            XposedBridge.log(TAG + " SettingsStore install failed: " + t.getMessage());
+        }
         try {
             loadFromXSharedPrefs();
         } catch (Throwable t) {
@@ -585,6 +693,12 @@ public class MainHook implements IXposedHookLoadPackage {
                         if (!(a0 instanceof android.view.KeyEvent)) return;
                         android.view.KeyEvent ev = (android.view.KeyEvent) a0;
                         int kc = ev.getKeyCode();
+                        // 先记电源键：截屏是「音量 + 电源」组合，两个键谁先落地都会经过这里。
+                        if (kc == android.view.KeyEvent.KEYCODE_POWER
+                                && ev.getAction() == android.view.KeyEvent.ACTION_DOWN) {
+                            sLastPowerDownAt = android.os.SystemClock.uptimeMillis();
+                            return;
+                        }
                         if (kc != android.view.KeyEvent.KEYCODE_VOLUME_UP
                                 && kc != android.view.KeyEvent.KEYCODE_VOLUME_DOWN) return;
                         if (!DockLive.hasAttachedLiveSlot()) return;
@@ -592,20 +706,41 @@ public class MainHook implements IXposedHookLoadPackage {
                             param.setResult(0); // UP 也吃掉，卡片应用拿不到成对的键
                             return;
                         }
-                        Object ctx = XposedHelpers.getObjectField(param.thisObject, "mContext");
+                        final Object pwm = param.thisObject;
+                        Object ctx = XposedHelpers.getObjectField(pwm, "mContext");
                         if (!(ctx instanceof android.content.Context)) return;
-                        android.media.AudioManager am = (android.media.AudioManager)
+                        final android.media.AudioManager am = (android.media.AudioManager)
                                 ((android.content.Context) ctx)
                                         .getSystemService(android.content.Context.AUDIO_SERVICE);
                         if (am == null) return;
-                        int dir = kc == android.view.KeyEvent.KEYCODE_VOLUME_UP
+                        final int dir = kc == android.view.KeyEvent.KEYCODE_VOLUME_UP
                                 ? android.media.AudioManager.ADJUST_RAISE
                                 : android.media.AudioManager.ADJUST_LOWER;
-                        am.adjustSuggestedStreamVolume(dir,
-                                android.media.AudioManager.STREAM_MUSIC,
-                                android.media.AudioManager.FLAG_SHOW_UI);
+                        final int keyCode = kc;
+                        // 截屏是组合键：音量键通常比电源键先落地，按键这一瞬间还看不出要截屏，
+                        // 立即弹条就一定会被截进图里。键当场吃掉，把「调音量 + 弹条」推到
+                        // 组合键窗口之后；窗口里等到了电源键就当截屏，这次不调也不弹。
+                        sVolumeHandler.postDelayed(new Runnable() {
+                            @Override
+                            public void run() {
+                                try {
+                                    if (android.os.SystemClock.uptimeMillis() - sLastPowerDownAt
+                                            < SCREENSHOT_CHORD_MS) {
+                                        return;
+                                    }
+                                    if (isScreenshotChord(pwm)) return;
+                                    am.adjustSuggestedStreamVolume(dir,
+                                            android.media.AudioManager.STREAM_MUSIC,
+                                            android.media.AudioManager.FLAG_SHOW_UI);
+                                    XposedBridge.log(TAG + "-volume docklive took key kc="
+                                            + keyCode + " dir=" + dir);
+                                } catch (Throwable t) {
+                                    XposedBridge.log(TAG + "-volume docklive take failed: "
+                                            + t.getMessage());
+                                }
+                            }
+                        }, SCREENSHOT_CHORD_MS / 2);
                         param.setResult(0);
-                        XposedBridge.log(TAG + "-volume docklive took key kc=" + kc + " dir=" + dir);
                     } catch (Throwable t) {
                         XposedBridge.log(TAG + "-volume docklive take failed: " + t.getMessage());
                     }
@@ -828,6 +963,10 @@ public class MainHook implements IXposedHookLoadPackage {
         hookLiveRestoreCloseAnimation(lpparam.classLoader);
         // 第十三层：官方首开动画那块纯色底板（灰直角板）不再显示
         hookDockMaskSurfaceHidden(lpparam.classLoader);
+        // 第十四层（仅 5200/SDK37）：灵活窗口「超上限」不踢坞窗里的任务，否则凭空冒一颗浮标球
+        if (android.os.Build.VERSION.SDK_INT >= 37) {
+            hookSkipDockTaskExceedLimit(lpparam.classLoader);
+        }
     }
 
     /** Ensure ColorOS's native flexible-task handler owns freeform swipe-to-home transitions. */
@@ -964,7 +1103,38 @@ public class MainHook implements IXposedHookLoadPackage {
                             if (!sDockShowing || sDockClosing || record == origin) return;
 
                             int activityType = activityTypeOf(record);
-                            if (activityType == 2 || activityType == 3) { // HOME / RECENTS
+                            // 「临时页退出回到桌面」不能当成用户按 Home。
+                            // 第三方工具常弹一个执行动作的页面（日志里 xedgepro 的
+                            // ActivityPerformAction 就是 50ms 前才起的前台），它一结束，
+                            // 回到的就是坞窗底下的桌面；这时关坞窗等于坞窗自己消失。
+                            // 判据：上一前台是否已经在收尾/停止/销毁。是就是临时页退出，
+                            // 只更新基线不关；用户真按 Home 时上一页还活着，照旧关闭。
+                            boolean transientPageReturn = false;
+                            if (activityType == 2 && previous != null && previous != origin) {
+                                try {
+                                    Object prevState = XposedHelpers.callMethod(previous, "getState");
+                                    String st = prevState == null ? "" : prevState.toString();
+                                    transientPageReturn = "FINISHING".equals(st)
+                                            || "DESTROYED".equals(st) || "STOPPED".equals(st);
+                                    if (!transientPageReturn) {
+                                        java.lang.reflect.Field f = null;
+                                        Class<?> k = previous.getClass();
+                                        while (k != null && f == null) {
+                                            try {
+                                                f = k.getDeclaredField("finishing");
+                                            } catch (Throwable ignored) {
+                                                k = k.getSuperclass();
+                                            }
+                                        }
+                                        if (f != null) {
+                                            f.setAccessible(true);
+                                            transientPageReturn = f.getBoolean(previous);
+                                        }
+                                    }
+                                } catch (Throwable ignored) {
+                                }
+                            }
+                            if ((activityType == 2 || activityType == 3) && !transientPageReturn) { // HOME / RECENTS
                                 sDockCloseDuringSystemGesture = true;
                                 XposedBridge.log(TAG + " Home/Recents resumed while dock open; dismissing"
                                         + " type=" + activityType + " origin=" + origin + " resumed=" + record);
@@ -972,10 +1142,17 @@ public class MainHook implements IXposedHookLoadPackage {
                             } else {
                                 // The foreground app changed without a system navigation gesture.
                                 // Use it as the new baseline so the next Home gesture still closes.
-                                sDockOriginActivity = record;
-                                XposedBridge.log(TAG + " ordinary activity resumed; keep dock open"
-                                        + " previous=" + previous + " resumed=" + record
-                                        + " type=" + activityType);
+                                // 临时页退出回桌面时不换基线：否则基线变成桌面，之后用户真按
+                                // Home（record == origin）会被最前面的判断直接放过，坞窗反而不关。
+                                if (!transientPageReturn) {
+                                    sDockOriginActivity = record;
+                                    XposedBridge.log(TAG + " ordinary activity resumed; keep dock open"
+                                            + " previous=" + previous + " resumed=" + record
+                                            + " type=" + activityType);
+                                } else {
+                                    XposedBridge.log(TAG + " transient page returned to home, keep dock open"
+                                            + " previous=" + previous + " resumed=" + record);
+                                }
                             }
                         } catch (Throwable t) {
                             XposedBridge.log(TAG + " dock activity transition check failed: " + t);
@@ -1008,6 +1185,40 @@ public class MainHook implements IXposedHookLoadPackage {
                         }
                     });
             XposedBridge.log(TAG + " live Task SurfaceView reparent lock installed");
+            // 锁屏/解锁重排时 SurfaceView 会重新 applyBackgroundLayer 把 Background 子层 show 出来，
+            // 那层是矩形、不吃父层圆角，露出来就是那块直角斑。它本来不该出现在卡面上，
+            // 因此在这个唯一合流点（事务提交前）统一 hide 掉：谁 show 的都会被压回去。
+            XposedBridge.hookAllMethods(SurfaceControl.Transaction.class, "apply",
+                    new XC_MethodHook() {
+                        @Override
+                        protected void beforeHookedMethod(MethodHookParam param) {
+                            try {
+                                if (param.thisObject instanceof SurfaceControl.Transaction) {
+                                    DockLive.ensureBackgroundHidden(
+                                            (SurfaceControl.Transaction) param.thisObject);
+                                }
+                            } catch (Throwable ignored) {
+                            }
+                        }
+                    });
+            XposedBridge.log(TAG + " background layer killer installed");
+            // 只在提交前压住还不够：锁屏重建时它会先 show，到 apply 前才被压回去，中间隔一帧合成，
+            // 屏幕上就闪一下。这里直接在源头拦 show —— 对坞窗卡片的 Background 子层，show 根本不执行。
+            XposedBridge.hookAllMethods(SurfaceControl.Transaction.class, "show",
+                    new XC_MethodHook() {
+                        @Override
+                        protected void beforeHookedMethod(MethodHookParam param) {
+                            try {
+                                if (param.args.length < 1
+                                        || !(param.args[0] instanceof SurfaceControl)) return;
+                                if (DockLive.isLiveBackgroundControl((SurfaceControl) param.args[0])) {
+                                    param.setResult(param.thisObject);
+                                }
+                            } catch (Throwable ignored) {
+                            }
+                        }
+                    });
+            XposedBridge.log(TAG + " background show blocked");
             // 坞窗卡片里的 Task 层必须按"自由小窗"样式显示：ColorOS 的迷你窗态会给 Task 层
             // 挂 BorderSettings{strokeWidth=108.55, color=0x66FFFFFF}（真机 dumpsys SurfaceFlinger
             // 层树：Layer[126] Task=1076#126），缩到卡片上就是一圈 47px 厚白边。
@@ -1106,6 +1317,9 @@ public class MainHook implements IXposedHookLoadPackage {
             XposedBridge.hookAllConstructors(listener, new XC_MethodHook() {
                 @Override
                 protected void afterHookedMethod(MethodHookParam param) {
+                    if (param.thisObject != null) {
+                        armGestureDirectionTracker(param.thisObject.getClass());
+                    }
                     for (Object arg : param.args) {
                         if (arg == null) continue;
                         hookGestureCallbacks(arg.getClass(), "listener-ctor");
@@ -1175,6 +1389,55 @@ public class MainHook implements IXposedHookLoadPackage {
         return true;
     }
 
+    /**
+     * 在 SystemGesturesPointerEventListener 的触摸流里记下起手点与位移方向（横向/竖直）。
+     * 系统判返回手势时不给坐标，所以只能从这里拿：同一个触摸流先过 onPointerEvent，
+     * 再走到 startBackNavigation，方向就是这次手势的真实方向。
+     */
+    private void armGestureDirectionTracker(Class<?> listenerCls) {
+        String key = listenerCls.getName();
+        synchronized (sGestureDirectionClasses) {
+            if (sGestureDirectionClasses.contains(key)) return;
+            sGestureDirectionClasses.add(key);
+        }
+        try {
+            int hooked = XposedBridge.hookAllMethods(listenerCls, "onPointerEvent",
+                    new XC_MethodHook() {
+                        @Override
+                        protected void beforeHookedMethod(MethodHookParam param) {
+                            try {
+                                if (param.args.length == 0 || !(param.args[0] instanceof MotionEvent)) return;
+                                MotionEvent e = (MotionEvent) param.args[0];
+                                switch (e.getActionMasked()) {
+                                    case MotionEvent.ACTION_DOWN:
+                                        sGestureDownX = e.getX();
+                                        sGestureDownY = e.getY();
+                                        sGestureTracking = true;
+                                        sGestureHorizontal = false;
+                                        break;
+                                    case MotionEvent.ACTION_MOVE:
+                                        if (!sGestureTracking) return;
+                                        sGestureHorizontal = Math.abs(e.getX() - sGestureDownX)
+                                                > Math.abs(e.getY() - sGestureDownY);
+                                        break;
+                                    case MotionEvent.ACTION_UP:
+                                    case MotionEvent.ACTION_CANCEL:
+                                        sGestureTracking = false;
+                                        sGestureEndedAt = android.os.SystemClock.uptimeMillis();
+                                        break;
+                                    default:
+                                        break;
+                                }
+                            } catch (Throwable ignored) {
+                            }
+                        }
+                    }).size();
+            XposedBridge.log(TAG + " gesture direction tracker on " + key + " methods=" + hooked);
+        } catch (Throwable t) {
+            XposedBridge.log(TAG + " gesture direction tracker failed on " + key + ": " + t);
+        }
+    }
+
     private void dismissDockForSystemGesture(String edge) {
         if (!sDockShowing || sDockClosing) return;
         sDockCloseDuringSystemGesture = true;
@@ -1214,9 +1477,22 @@ public class MainHook implements IXposedHookLoadPackage {
                             }
                             XposedBridge.log(TAG + " back gesture with dock open; focused taskId="
                                     + taskId + " live=" + DockLive.isLiveTask(taskId));
-                            if (taskId <= 0 || !DockLive.isLiveTask(taskId)) return;
-                            // 只放掉卡片父层锁，不 handoff 给系统 Back、不设置 sDockBackRestoreTaskId
-                            // （那两样都是"让系统接管任务"的路径，会把任务层重新 show 出来）。
+                            // 贴边竖直滑动（用户只是上滑，手却压在边缘热区里）不该收起坞窗：
+                            // ColorOS 会把它报成返回手势，这里按位移方向把它挡回去，只吞掉这次
+                            // Back（应用不收到），坞窗保持原样。
+                            boolean edgeSwipe = sGestureTracking
+                                    || (android.os.SystemClock.uptimeMillis() - sGestureEndedAt) < GESTURE_HANDOFF_MS;
+                            if (edgeSwipe && !sGestureHorizontal) {
+                                DockLive.releaseSurfaceParentLock();
+                                swallowBackNavigation(param);
+                                XposedBridge.log(TAG + " vertical edge swipe (dy>dx); dock kept open"
+                                        + " tracking=" + sGestureTracking);
+                                return;
+                            }
+                            // 坞窗开着时，返回手势只负责收起坞窗——在应用里、在桌面上都一样。
+                            // 原来这里要求焦点任务必须是坞窗里的 live 任务，桌面上它的焦点是
+                            // launcher，命中不了就直接放过，于是桌面上按返回坞窗不动。
+                            // 这里清掉那个前置判断，改成无条件吞掉这次 Back。
                             DockLive.releaseSurfaceParentLock();
                             swallowBackNavigation(param);
                             if (!sDockClosing) dismissDockForSystemGesture("back-gesture");
@@ -1503,6 +1779,55 @@ public class MainHook implements IXposedHookLoadPackage {
             XposedBridge.log(TAG + " hook createLeashAnimSpec failed: " + t.getMessage());
         }
 
+    }
+
+    /**
+     * 5200（SDK 37）实证：坞窗打开后系统会走
+     * {@code FlexibleWindowManagerService.finishSplitDragAnimationAndStartFlexible →
+     * updateTaskMaxNumWhenFocusChangedInPanoramic → handleExceedLimitFlexibleTask →
+     * exitFlexibleTaskWindowInnerLocked(exitTo:5)}，把坞窗里刚挂上的任务当成「超上限」
+     * 踢出灵活窗口并 {@code addFloatHandle}，屏幕边缘就凭空多出一颗悬浮球。
+     *
+     * <p>坞窗里的任务本来就该同时在坞窗内存在，不算超限：这里按 taskId 判断，属于坞窗
+     * live 任务就整段跳过，官方其它任务的超限清理照旧。</p>
+     */
+    private void hookSkipDockTaskExceedLimit(ClassLoader cl) {
+        try {
+            Class<?> controllerCls = XposedHelpers.findClass(
+                    "com.android.server.wm.FlexibleTaskController", cl);
+            Class<?> taskCls = XposedHelpers.findClass("com.android.server.wm.Task", cl);
+            XposedBridge.hookAllMethods(controllerCls, "handleExceedLimitFlexibleTask",
+                    new XC_MethodHook() {
+                        @Override
+                        protected void beforeHookedMethod(MethodHookParam param) {
+                            try {
+                                int taskId = -1;
+                                for (Object arg : param.args) {
+                                    if (arg != null && taskCls.isInstance(arg)) {
+                                        taskId = taskIdOfTask(arg);
+                                        break;
+                                    }
+                                }
+                                if (taskId <= 0 || !DockLive.isLiveTask(taskId)) return;
+                                XposedBridge.log(TAG + " exceed limit skipped for dock task taskId="
+                                        + taskId);
+                                Class<?> rt = ((java.lang.reflect.Method) param.method)
+                                        .getReturnType();
+                                if (rt == void.class) param.setResult(null);
+                                else if (rt == boolean.class) param.setResult(false);
+                                else if (rt == int.class) param.setResult(0);
+                                else param.setResult(null);
+                            } catch (Throwable t) {
+                                XposedBridge.log(TAG + " exceed limit hook err: " + t.getMessage());
+                            }
+                        }
+                    });
+            localLog("hookSkipDockTaskExceedLimit installed");
+            XposedBridge.log(TAG + " hookSkipDockTaskExceedLimit installed");
+        } catch (Throwable t) {
+            localLog("hookSkipDockTaskExceedLimit failed: " + t.getMessage());
+            XposedBridge.log(TAG + " hookSkipDockTaskExceedLimit failed: " + t.getMessage());
+        }
     }
 
     /**
@@ -3179,6 +3504,7 @@ public class MainHook implements IXposedHookLoadPackage {
                 @Override
                 public void onClick(View v) {
                     try {
+                        XposedBridge.log(TAG + " clear tap, dock apps=" + sDockApps.size());
                         // 先把实时画面的图层与可见性还原成贴边隐藏态，再走官方清除，
                         // 否则任务还处于"可见"状态，removeFloatHandle 会让小窗闪一下
                         DockLive.releaseAll();
@@ -3677,6 +4003,8 @@ public class MainHook implements IXposedHookLoadPackage {
         final boolean night = isNightMode(ctx);
         LinearLayout card = new LinearLayout(ctx);
         card.setOrientation(LinearLayout.VERTICAL);
+        // 记下卡片对应的 taskId：外面（桌面图标）把这个任务正常打开时，要能找回这张卡并移除。
+        card.setTag(Integer.valueOf(taskId));
         LinearLayout.LayoutParams cardParams = new LinearLayout.LayoutParams(
                 LinearLayout.LayoutParams.MATCH_PARENT, LinearLayout.LayoutParams.WRAP_CONTENT);
         cardParams.bottomMargin = dpToPx(ctx, 5);
@@ -3765,9 +4093,10 @@ public class MainHook implements IXposedHookLoadPackage {
         XposedBridge.log(TAG + " addAppCard preview slot taskId=" + taskId
                 + " live=" + (taskId > 0));
         // 尺寸规则（横竖屏同一套）：宽 = dockWidth - 44dp（标题栏「图标左缘 → 三点右缘」那段），
-        // 高 = 宽 × 快照真实比例，再受坞窗可用高度约束。
-        int previewWidth = Math.max(dpToPx(ctx, 120), dockWidth - dpToPx(ctx, 44));
-        int maxPreviewHeight = Math.max(dpToPx(ctx, 120), (int) (dockHeight * 0.85f));
+        // 高 = 宽 × 快照真实比例，再受坞窗可用高度约束。整体再缩 10%（PREVIEW_SHRINK）。
+        int previewWidth = Math.max(dpToPx(ctx, 120),
+                (int) ((dockWidth - dpToPx(ctx, 44)) * PREVIEW_SHRINK));
+        int maxPreviewHeight = Math.max(dpToPx(ctx, 120), (int) (dockHeight * 0.85f * PREVIEW_SHRINK));
         // 固定比例：竖屏 16:9、横屏 13:9（与系统自由小窗两个默认比例一致）；
         // 横屏应用单独走 9:16，用一个矮框把横向画面完整铺开。
         // 关掉 FIXED_PREVIEW_ASPECT 就退回按快照真实比例的老行为。
@@ -3992,6 +4321,54 @@ public class MainHook implements IXposedHookLoadPackage {
     private static final String PREVIEW_TAG = "freewindow.snapshotPreview";
     /** 坞窗的滚动容器与卡片列表：滚动时按可视区裁 SurfaceView（surface 不跟着 ScrollView 裁剪）。 */
     private static ScrollView sDockScrollView = null;
+
+    /** 坞窗当前是否正展开在屏幕上（供 DockLive 判断任务被前台化是不是它自己引起的）。 */
+    static boolean isDockShowing() {
+        return sDockShowing;
+    }
+
+    /** 坞窗滚动区：画面热区要按它的可视范围裁剪，免得压到「清除」按钮上抢点击。 */
+    static ScrollView dockScrollView() {
+        return sDockScrollView;
+    }
+
+    /**
+     * 坞窗里的某个任务被外部正常打开了（桌面图标 / 最近任务），把它的卡片从坞窗里撤掉。
+     *
+     * 官方口径：贴过边的应用被外部打开时，浮标条目消失、坞窗里也不该再留一张预览卡；
+     * 留着就变成"坞窗里显示它、屏幕上也开着它"，两边状态互相打架。
+     * 这里只撤 UI 与登记，不去动图层——那一刻任务已经被系统拉去全屏，层不能再还回去。
+     */
+    static void removeDockCardForTask(int taskId) {
+        final LinearLayout list = sDockCardList;
+        if (taskId <= 0 || list == null || !sDockShowing) return;
+        int found = -1;
+        for (int i = 0; i < list.getChildCount(); i++) {
+            Object tag = list.getChildAt(i).getTag();
+            if (tag instanceof Integer && ((Integer) tag).intValue() == taskId) {
+                found = i;
+                break;
+            }
+        }
+        if (found < 0) return;
+        list.removeViewAt(found);
+        for (Object info : new ArrayList<Object>(sDockApps)) {
+            try {
+                if (XposedHelpers.getIntField(info, "taskId") == taskId) {
+                    sDockApps.remove(info);
+                    break;
+                }
+            } catch (Throwable ignored) {
+            }
+        }
+        XposedBridge.log(TAG + " dock card removed for external open taskId=" + taskId
+                + " cardsLeft=" + list.getChildCount());
+        refreshPreviewCrop();
+        if (list.getChildCount() == 0 && sDockShowing && !sDockClosing) {
+            XposedBridge.log(TAG + " dock empty after external open, dismissing taskId=" + taskId);
+            if (sInstance != null) sInstance.postRemoveFloatDock();
+        }
+    }
     private static LinearLayout sDockCardList = null;
     /** 坞窗窗口的屏幕左上角：SurfaceView 的 layer 坐标是相对窗口的，裁画面时要换算。 */
     private static int sDockWinLeft = 0;
@@ -4270,6 +4647,85 @@ public class MainHook implements IXposedHookLoadPackage {
         } catch (Throwable t) {
             XposedBridge.log(TAG + "-focus unfocusable failed: " + t.getMessage());
         }
+    }
+
+    /**
+     * 撤销 {@link #enforcePreviewUnfocusable} 给预览窗口加的 NOT_FOCUSABLE + NOT_TOUCHABLE。
+     *
+     * 卡片里的应用窗口是被直接改 mAttrs 锁死的：不加这一步，点卡片恢复出来的自由小窗
+     * 还带着「不可触摸」，手指全落不到窗口里，只有系统上滑手势能关掉——就是「只能上滑」。
+     */
+    static void clearPreviewTouchBlock(String pkg) {
+        if (pkg == null || sCl == null) return;
+        try {
+            if (sWms == null) {
+                Class<?> atmiCls = XposedHelpers.findClass(
+                        "com.android.server.wm.ActivityTaskManagerInternal", sCl);
+                Class<?> lsCls = XposedHelpers.findClass("com.android.server.LocalServices", sCl);
+                Object atms = XposedHelpers.callStaticMethod(lsCls, "getService", atmiCls);
+                sWms = XposedHelpers.getObjectField(atms, "mWindowManager");
+            }
+            int want = WindowManager.LayoutParams.FLAG_NOT_FOCUSABLE
+                    | WindowManager.LayoutParams.FLAG_NOT_TOUCHABLE;
+            java.util.Map<?, ?> map = (java.util.Map<?, ?>) XposedHelpers.getObjectField(sWms, "mWindowMap");
+            int changed = 0;
+            for (Object v : map.values()) {
+                WindowManager.LayoutParams lp =
+                        (WindowManager.LayoutParams) XposedHelpers.getObjectField(v, "mAttrs");
+                if (lp == null || lp.packageName == null) continue;
+                if (!pkg.equals(lp.packageName.toString())) continue;
+                if ((lp.flags & want) == 0) continue;
+                lp.flags &= ~want;
+                try {
+                    XposedHelpers.callMethod(v, "updateInputWindow");
+                } catch (Throwable ignored) {
+                }
+                changed++;
+            }
+            XposedBridge.log(TAG + "-focus preview unlocked pkg=" + pkg + " windows=" + changed);
+            if (changed > 0) {
+                try {
+                    XposedHelpers.callMethod(sWms, "updateFocusedWindowLocked", 0, true);
+                } catch (Throwable ignored) {
+                }
+            }
+        } catch (Throwable t) {
+            XposedBridge.log(TAG + "-focus unlock failed: " + t.getMessage());
+        }
+    }
+
+    /**
+     * 这一拍音量键是不是在参与「音量 + 电源」截屏组合键。
+     *
+     * PhoneWindowManager 在 interceptKeyBeforeQueueing 内部就会先跑截屏 chord 检测，
+     * 命中后把这些标志置 true（电源键先按、等音量键的那段也算）。
+     * 我们的音量键接管挂在 after，读到 true 就不再调音量，交给系统去截屏。
+     */
+    private static boolean isScreenshotChord(Object pwm) {
+        if (pwm == null) return false;
+        String[] fields = {
+                "mVolumeDownKeyConsumedByScreenshotChord",
+                "mVolumeUpKeyConsumedByScreenshotChord",
+                "mScreenshotChordVolumeDownKeyTriggered",
+                "mScreenshotChordVolumeUpKeyTriggered",
+                "mScreenshotChordPowerKeyTriggered"
+        };
+        for (String f : fields) {
+            Class<?> k = pwm.getClass();
+            while (k != null) {
+                try {
+                    java.lang.reflect.Field fld = k.getDeclaredField(f);
+                    fld.setAccessible(true);
+                    if (fld.getBoolean(pwm)) return true;
+                    break;
+                } catch (NoSuchFieldException ignored) {
+                    k = k.getSuperclass();   // 字段可能在父类
+                } catch (Throwable ignored) {
+                    break;                   // 有字段但读不到，跳过
+                }
+            }
+        }
+        return false;
     }
 
     private Object resolveAudioService(ClassLoader cl) {
@@ -4565,17 +5021,24 @@ public class MainHook implements IXposedHookLoadPackage {
 
     /** 清除坞窗中所有应用。 */
     private void clearAllDockApps(ClassLoader cl) {
-        for (Object info : new ArrayList<>(sDockApps)) {
+        final List<Object> snapshot = new ArrayList<>(sDockApps);
+        XposedBridge.log(TAG + " clear all start apps=" + snapshot.size());
+        int index = 0;
+        for (Object info : snapshot) {
+            index++;
             try {
                 String pkgName = (String) XposedHelpers.callMethod(info, "getPackageName");
                 int userId = (int) XposedHelpers.callMethod(info, "getUserId");
                 int taskId = XposedHelpers.getIntField(info, "taskId");
+                XposedBridge.log(TAG + " clear app #" + index + " pkg=" + pkgName + " taskId=" + taskId);
                 removeSingleApp(pkgName, userId, taskId, info, cl);
+                XposedBridge.log(TAG + " clear app #" + index + " done taskId=" + taskId);
             } catch (Throwable t) {
-                XposedBridge.log(TAG + " clear app error: " + t.getMessage());
+                XposedBridge.log(TAG + " clear app error #" + index + ": " + t.getMessage());
             }
         }
         sDockApps.clear();
+        XposedBridge.log(TAG + " clear all done cleared=" + index);
     }
 
     /** 移除坞窗：右侧从左往右滑入收回，左侧从右往左滑入收回，结束后再显示悬浮球。 */
@@ -4754,6 +5217,56 @@ public class MainHook implements IXposedHookLoadPackage {
         }
     }
 
+    /**
+     * 锁屏时收起坞窗——不能复用带滑出动画的正常关闭路径。
+     *
+     * <p>正常关闭是 removeFloatDock 先跑 DOCK_ANIM_MS 的滑出，收尾放在
+     * withEndAction → finishRemoveDock。熄屏这一拍动画的结束回调不保证回来，
+     * 窗口和卡片 SurfaceView 就留在系统里；解锁时整屏可见性重算，SurfaceView
+     * 自带的背景子层被重新 show 出来，就是那块直角。所以锁屏这一拍直接同步收尾：
+     * 不进动画、立刻 releaseAll + removeViewImmediate。</p>
+     */
+    static void dismissDockForLock() {
+        if (!sDockShowing || sDockClosing) {
+            XposedBridge.log(TAG + " lock dismiss skip showing=" + sDockShowing + " closing=" + sDockClosing);
+            return;
+        }
+        MainHook self = sInstance;
+        if (self == null) {
+            XposedBridge.log(TAG + " lock dismiss skipped: no instance");
+            return;
+        }
+        XposedBridge.log(TAG + " lock dismiss start (immediate close, no slide animation)");
+        self.postRemoveFloatDockForLock();
+    }
+
+    /**
+     * 锁屏用的同步关闭入口。只把动作 post 到坞窗自己的线程（不延迟、不等动画），
+     * 到那一帧立刻收尾：收尾越早，窗口越不可能跟着熄屏留在系统里。
+     */
+    private void postRemoveFloatDockForLock() {
+        final FrameLayout container = sDockContainer;
+        if (container == null) {
+            removeFloatDockForLock();
+            return;
+        }
+        container.post(new Runnable() {
+            @Override public void run() {
+                if (sDockContainer == container && sDockShowing && !sDockClosing) {
+                    removeFloatDockForLock();
+                }
+            }
+        });
+    }
+
+    /** 锁屏专用：不滑出、不等待，直接走 finishRemoveDock。 */
+    private void removeFloatDockForLock() {
+        if (sDockClosing) return;
+        sDockClosing = true;
+        removeAppMenu();
+        finishRemoveDock();
+    }
+
     /** Keep unlock gestures out of the full-screen dock overlay while keyguard is showing. */
     static void setDockTouchable(boolean touchable) {
         FrameLayout container = sDockContainer;
@@ -4804,7 +5317,9 @@ public class MainHook implements IXposedHookLoadPackage {
             try {
                 Context ctx = sDockContainer.getContext();
                 WindowManager wm = (WindowManager) ctx.getSystemService(Context.WINDOW_SERVICE);
-                wm.removeView(sDockContainer);
+                // 同步摘窗口：removeView 是异步的，锁屏这一拍不能等下一帧，
+                // 否则窗口会跟着熄屏一起留在系统里，解锁重算时又露出直角层。
+                wm.removeViewImmediate(sDockContainer);
             } catch (Throwable ignored) {
             }
             sDockContainer = null;
@@ -4849,7 +5364,18 @@ public class MainHook implements IXposedHookLoadPackage {
             Object floatManager = XposedHelpers.getObjectField(fhc, "mFloatManager");
             if (floatManager != null) {
                 if (hide) {
+                    // 坞窗打开时球必须立刻消失，不能留淡出过程：先 forceHidden 压住，
+                    // 官方 hideFloatHandleView 的淡出动画会重写 alpha，紧跟一帧再压一次。
+                    Object handleView = null;
+                    try {
+                        handleView = XposedHelpers.callMethod(floatManager, "getView");
+                    } catch (Throwable ignored) {
+                    }
+                    applyHandleAlpha(sCurrentFloatHandleView, true);
+                    applyHandleAlpha(handleView, true);
                     XposedHelpers.callMethod(floatManager, "hideFloatHandleView");
+                    applyHandleAlpha(sCurrentFloatHandleView, true);
+                    applyHandleAlpha(handleView, true);
                     XposedBridge.log(TAG + " hideAllFloatHandles: hideFloatHandleView");
                 } else {
                     applyHandleAlpha(XposedHelpers.callMethod(floatManager, "getView"), false);

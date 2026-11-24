@@ -462,6 +462,17 @@ final class FloatKeepAliveHook {
                         Object task = callNoArg(param.thisObject, "getTask");
                         clearTaskLively(task);
                         leaveKeepAlive(param.thisObject, "resumed_top");
+                        // 官方口径：应用被外部正常打开后，浮标里的条目没了，坞窗里也不该再留它。
+                        // 但坞窗正展开时这里的 RESUMED 是坞窗自己把卡片任务拉上顶层造成的，
+                        // 不是用户从桌面打开——此时撤卡会把坞窗清空并自动收起（要点两次悬浮球）。
+                        int extTaskId = taskIdOf(param.thisObject);
+                        if (!MainHook.isDockShowing()) {
+                            try {
+                                DockLive.onTaskExternallyOpened(extTaskId);
+                                MainHook.removeDockCardForTask(extTaskId);
+                            } catch (Throwable ignored) {
+                            }
+                        }
                     }
                     if (!shouldKeep(param.thisObject)) return;
                     if (STOP_STATES.contains(state)) {
@@ -678,7 +689,14 @@ final class FloatKeepAliveHook {
                     if (param.args.length < 2) return;
                     Object showing = param.args[1];
                     if (!(showing instanceof Boolean)) return;
-                    if (!((Boolean) showing).booleanValue()) {
+                    boolean keyguardShowing = ((Boolean) showing).booleanValue();
+                    XposedBridge.log(TAG + " keyguard state changed showing=" + keyguardShowing
+                            + " who=" + param.args[0]);
+                    if (keyguardShowing) {
+                        // 官方锁屏事件：坞窗开着就按正常关闭路径收掉（和点坞窗外一致），
+                        // 这样收起后的状态和平时手动收起完全一样，解锁不会弹窗
+                        MainHook.dismissDockForLock();
+                    } else {
                         param.setObjectExtra("fw_unlocking", Boolean.TRUE);
                         beginUnlockGuard();
                     }

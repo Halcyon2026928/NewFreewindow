@@ -4,6 +4,7 @@ import android.app.Activity;
 import android.app.AlertDialog;
 import android.app.Dialog;
 import android.content.Context;
+import android.content.Intent;
 import android.content.SharedPreferences;
 import android.content.res.Configuration;
 import android.graphics.Color;
@@ -63,6 +64,7 @@ public class SettingsActivity extends Activity {
         try {
             ModulePrefs.get(this).edit().putInt(KEY_THEME_MODE, themeMode).commit();
             ModulePrefs.makePrefsReadable(this);
+            pushSettings(this);
         } catch (Throwable ignored) {
         }
         setTheme(light ? R.style.LightTheme : R.style.AppTheme);
@@ -82,6 +84,7 @@ public class SettingsActivity extends Activity {
                 ModulePrefs.get(SettingsActivity.this)
                         .edit().putInt(KEY_THEME_MODE, next).commit();
                 ModulePrefs.makePrefsReadable(SettingsActivity.this);
+                pushSettings(SettingsActivity.this);
                 try {
                     getContentResolver().notifyChange(ConfigProvider.CONFIG_URI, null);
                 } catch (Throwable ignored) {
@@ -485,6 +488,33 @@ public class SettingsActivity extends Activity {
         // commit 会重写 xml（权限回到 0600），必须马上放开成 world-readable，
         // 否则模块 app 进程退出后 system_server 就读不到，开关表现为全部恢复默认。
         ModulePrefs.makePrefsReadable(this);
+        // 顺手把整份开关推给 system_server 落盘：它开机先读自己的那份，
+        // 不依赖 xprefs 能不能读到，这样重启后开关不会掉回默认值。
+        pushSettings(this);
+    }
+
+    /**
+     * 把当前开关整份推给 system_server。
+     *
+     * <p>模块 app 的 prefs 在系统进程里不一定读得到（world-readable 已被限制），
+     * provider 又要等 app 进程起来，所以由 app 主动推一份，系统进程写进
+     * /data/system 下的文件，开机时先用它。</p>
+     */
+    static void pushSettings(Context ctx) {
+        if (ctx == null) return;
+        try {
+            SharedPreferences prefs = ModulePrefs.get(ctx);
+            Intent intent = new Intent(SettingsStore.ACTION_PUSH);
+            intent.putExtra(KEY_HIDE_BOTTOM_BAR, prefs.getBoolean(KEY_HIDE_BOTTOM_BAR, true));
+            intent.putExtra(KEY_HIDE_THREE_DOT, prefs.getBoolean(KEY_HIDE_THREE_DOT, true));
+            intent.putExtra(KEY_ENABLE_DOCK, prefs.getBoolean(KEY_ENABLE_DOCK, true));
+            intent.putExtra(KEY_KEEP_ALIVE, prefs.getBoolean(KEY_KEEP_ALIVE, true));
+            intent.putExtra(KEY_UNLOCK_LIMIT, prefs.getBoolean(KEY_UNLOCK_LIMIT, true));
+            intent.putExtra(KEY_LIVE_PREVIEW, prefs.getBoolean(KEY_LIVE_PREVIEW, true));
+            intent.putExtra(KEY_THEME_MODE, prefs.getInt(KEY_THEME_MODE, THEME_FOLLOW_SYSTEM));
+            ctx.sendBroadcast(intent);
+        } catch (Throwable ignored) {
+        }
     }
 
     /**

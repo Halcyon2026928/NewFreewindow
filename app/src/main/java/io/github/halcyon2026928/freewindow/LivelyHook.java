@@ -58,6 +58,12 @@ public final class LivelyHook {
     }
     /** 旋转时被作废的旧快照：重新抓图失败时用它兜底，避免卡片空白。 */
     private static final ConcurrentHashMap<Integer, Bitmap> sFallback = new ConcurrentHashMap<>();
+    /**
+     * 静态画面模式下的"永久封面"：每个任务只钉住第一次成功抓到的那张图。
+     * 用户口径：关掉实时画面后，坞窗反复开关、外面怎么滚页面，这张图都不能变、不能消失。
+     * 所以它既不参与 releaseSnapshot，也不会被后续抓图覆盖。
+     */
+    private static final ConcurrentHashMap<Integer, Bitmap> sPermaSnapshot = new ConcurrentHashMap<>();
     private static final Handler sMain = new Handler(Looper.getMainLooper());
     private static ClassLoader sClassLoader;
 
@@ -553,6 +559,27 @@ public final class LivelyHook {
                 + " info=" + (floatHandleInfo == null ? "null" : floatHandleInfo.getClass().getName()));
         dumpInfo(floatHandleInfo);
 
+        // 永久底图：静态画面模式和实时画面模式共用这一张。
+        // 有图就直接铺上去返回，不再重建、不再抓图——坞窗关过再开、外面滚动页面都不会动它；
+        // 实时画面模式下它垫在实时层下面当兜底，实时层重载时露出来的是这张图而不是空白。
+        if (taskId >= 0) {
+            Bitmap perma = sPermaSnapshot.get(taskId);
+            if (perma == null || perma.isRecycled()) {
+                Bitmap seed = sSnapshots.get(taskId);
+                if (seed == null || seed.isRecycled()) seed = sFallback.get(taskId);
+                if (seed != null && !seed.isRecycled()) {
+                    perma = seed;
+                    sPermaSnapshot.put(taskId, perma);
+                    log("static snapshot seeded taskId=" + taskId);
+                }
+            }
+            if (perma != null && !perma.isRecycled()) {
+                applyRoundedBitmap(preview, perma, radius);
+                log("static permanent snapshot taskId=" + taskId);
+                return preview;
+            }
+        }
+
         Bitmap ready = taskId >= 0 ? sSnapshots.get(taskId) : null;
         if (ready == null) {
             ready = readInfoSnapshot(floatHandleInfo);
@@ -632,7 +659,29 @@ public final class LivelyHook {
                     return;
                 }
                 final Bitmap bmp = captured;
+                // 抓回来的是空白（全透明/纯色，任务在后台没有可抓内容时的典型结果），
+                // 不能用它覆盖已经钉住的底图，否则卡片就变回空白 —— 用户看到的"静态画面消失"。
+                if (isBlankBitmap(bmp)) {
+                    Bitmap keep = sPermaSnapshot.get(taskId);
+                    if (keep == null || keep.isRecycled()) keep = sFallback.get(taskId);
+                    if (keep != null && !keep.isRecycled()) {
+                        final Bitmap show = keep;
+                        preview.post(new Runnable() {
+                            @Override
+                            public void run() {
+                                applyRoundedBitmap(preview, show, radius);
+                            }
+                        });
+                        log("capture blank, keep previous snapshot taskId=" + taskId);
+                        return;
+                    }
+                    log("capture blank taskId=" + taskId + " try=" + tries);
+                    return;
+                }
                 sSnapshots.put(taskId, bmp);
+                if (taskId >= 0) {
+                    sPermaSnapshot.put(taskId, bmp);
+                }
                 // 必须投回预览 View 自己的线程再设图。
                 // 坞窗是挂在 system_server 的 android.ui 线程上的（showFloatDock 由悬浮球点击回调触发），
                 // 而这里（sMain = main 线程）直接 setImageBitmap 会抛
@@ -716,6 +765,31 @@ public final class LivelyHook {
             if (h > 0) return h;
         }
         return (int) (width * aspect);
+    }
+
+    /** 空白快照判定：全透明，或整张只剩一种颜色（后台任务抓图失败的典型结果）。 */
+    private static boolean isBlankBitmap(Bitmap b) {
+        if (b == null || b.isRecycled() || b.getWidth() <= 0 || b.getHeight() <= 0) return true;
+        int w = b.getWidth();
+        int h = b.getHeight();
+        int stepX = Math.max(1, w / 16);
+        int stepY = Math.max(1, h / 16);
+        int firstRgb = 0;
+        boolean hasOpaque = false;
+        for (int y = 0; y < h; y += stepY) {
+            for (int x = 0; x < w; x += stepX) {
+                int px = b.getPixel(x, y);
+                if ((px >>> 24) < 8) continue;
+                int rgb = px & 0x00FFFFFF;
+                if (!hasOpaque) {
+                    firstRgb = rgb;
+                    hasOpaque = true;
+                } else if (rgb != firstRgb) {
+                    return false;
+                }
+            }
+        }
+        return true;
     }
 
     private static void applyRoundedBitmap(ImageView preview, Bitmap src, float radius) {
