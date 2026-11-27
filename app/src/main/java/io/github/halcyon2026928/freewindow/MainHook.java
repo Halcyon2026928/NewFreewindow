@@ -67,6 +67,21 @@ public class MainHook implements IXposedHookLoadPackage {
     /** 落盘文件是否已经用第一次读到的有效配置自举过。 */
     private static boolean sStoreBootstrapped;
 
+    /** provider 首查的单飞标记：上一次还没回来就不再排队。 */
+    private static final java.util.concurrent.atomic.AtomicBoolean sProviderQuerying =
+            new java.util.concurrent.atomic.AtomicBoolean(false);
+    /** 配置查询专用后台线程 / 回主线程用的 Handler。 */
+    private static Handler sConfigWorker;
+    private static Handler sConfigMain;
+
+    /** 已创建的标题栏实例（弱引用）：开关变化时用来就地刷新，不必等用户重开窗口。 */
+    private static final List<java.lang.ref.WeakReference<View>> sCaptionViews = new ArrayList<>();
+    /** 每个标题栏被摘掉的三点按钮记录：parent / index / child，关掉开关时原样塞回去。 */
+    private static final java.util.WeakHashMap<View, RemovedCaptionChild> sRemovedCaptionChildren =
+            new java.util.WeakHashMap<>();
+    /** removeViewCleanly 刚摘下的视图，调用方紧接着取走存进上面的 map。 */
+    private static RemovedCaptionChild sPendingRemovedChild;
+
     /** 「音量 + 电源」截屏组合键的判定窗口，AOSP 的 ScreenshotChord 就是这个量级。 */
     private static final long SCREENSHOT_CHORD_MS = 300L;
 
@@ -222,50 +237,118 @@ public class MainHook implements IXposedHookLoadPackage {
         }
     }
 
-    /** 从 LSPosed XSharedPreferences 读取（重启后仍有效），再用 ConfigProvider 覆盖一次以便当场改开关。 */
+    /** 读开关的唯一入口。
+     *
+     * <p>落盘文件（/data/system/freewindow_settings.txt）是权威来源，由 SettingsStore 在开机和
+     * 收到 app 推送时维护；有它就不必再碰 xprefs 和 provider。只有文件缺失（首次使用）时，
+     * 才退回 xprefs 读一次，读不到再在后台线程向 ConfigProvider 要一次——绝不能在输入线程上
+     * 同步查，否则 provider 进程被冻结时会把 android.ui 堵满 5 秒，触发 Input dispatching ANR。</p>
+     */
     private void loadConfigFromContext(Context ctx) {
-        loadFromXSharedPrefs();
-        if (ctx == null) return;
-        try {
-            ContentResolver cr = ctx.getContentResolver();
-            Cursor c = cr.query(ConfigProvider.CONFIG_URI, null, null, null, null);
-            if (c != null) {
-                try {
-                    while (c.moveToNext()) {
-                        String key = c.getString(0);
-                        int value = c.getInt(1);
-                        if (KEY_HIDE_BOTTOM_BAR.equals(key)) {
-                            hideBottomBar = value == 1;
-                        } else if (KEY_HIDE_THREE_DOT.equals(key)) {
-                            hideThreeDot = value == 1;
-                        } else if (KEY_ENABLE_DOCK.equals(key)) {
-                            enableDock = value == 1;
-                        } else if (KEY_UNLOCK_LIMIT.equals(key)) {
-                            unlockFloatLimit = value == 1;
-                        } else if (KEY_THEME_MODE.equals(key)) {
-                            themeMode = value;
-                        } else if (KEY_LIVE_PREVIEW.equals(key)) {
-                            livePreview = value == 1;
-                        }
-                    }
-                    configLoaded = true;
-                    // 交给 DockLive：卡片建的时候据此决定挂不挂实时层、开不开热区。
-                    DockLive.setLivePreviewEnabled(livePreview);
-                    bootstrapStoreOnce();
-                    XposedBridge.log(TAG + " config(provider) -> hideBottomBar=" + hideBottomBar
-                            + " hideThreeDot=" + hideThreeDot
-                            + " enableDock=" + enableDock
-                            + " unlockFloatLimit=" + unlockFloatLimit
-                            + " livePreview=" + livePreview);
-                } finally {
-                    c.close();
-                }
-            } else {
-                XposedBridge.log(TAG + " loadConfig: provider cursor null, use XSharedPreferences");
-            }
-        } catch (Throwable t) {
-            XposedBridge.log(TAG + " loadConfig provider fail, use XSharedPreferences: " + t.getMessage());
+        if (SettingsStore.isAuthoritative()) {
+            XposedBridge.log(TAG + " config(store authoritative) -> hideBottomBar=" + hideBottomBar
+                    + " hideThreeDot=" + hideThreeDot
+                    + " enableDock=" + enableDock
+                    + " unlockFloatLimit=" + unlockFloatLimit
+                    + " livePreview=" + livePreview);
+            return;
         }
+        loadFromXSharedPrefs();
+        if (configLoaded) return;
+        if (ctx != null) {
+            refreshConfigFromProviderAsync(ctx);
+        }
+    }
+
+    /** 首次自举专用：后台线程查一次 ConfigProvider，结果回主线程落到开关字段。 */
+    private void refreshConfigFromProviderAsync(final Context ctx) {
+        if (!sProviderQuerying.compareAndSet(false, true)) return;
+        try {
+            final Context appCtx = ctx.getApplicationContext() != null ? ctx.getApplicationContext() : ctx;
+            configWorker().post(new Runnable() {
+                @Override
+                public void run() {
+                    java.util.Map<String, Integer> values = null;
+                    try {
+                        Cursor c = appCtx.getContentResolver()
+                                .query(ConfigProvider.CONFIG_URI, null, null, null, null);
+                        if (c != null) {
+                            try {
+                                while (c.moveToNext()) {
+                                    if (values == null) values = new java.util.LinkedHashMap<>();
+                                    values.put(c.getString(0), c.getInt(1));
+                                }
+                            } finally {
+                                c.close();
+                            }
+                        }
+                    } catch (Throwable t) {
+                        XposedBridge.log(TAG + " config(provider async) fail: " + t.getMessage());
+                    } finally {
+                        sProviderQuerying.set(false);
+                    }
+                    final java.util.Map<String, Integer> snapshot = values;
+                    if (snapshot == null || snapshot.isEmpty()) {
+                        XposedBridge.log(TAG + " config(provider async): empty, keep cached");
+                        return;
+                    }
+                    configMain().post(new Runnable() {
+                        @Override
+                        public void run() {
+                            applyProviderValues(snapshot);
+                        }
+                    });
+                }
+            });
+        } catch (Throwable t) {
+            sProviderQuerying.set(false);
+            XposedBridge.log(TAG + " config(provider async) post fail: " + t.getMessage());
+        }
+    }
+
+    /** 把异步拉到的开关值落到字段（主线程执行，并顺手自举落盘）。 */
+    private void applyProviderValues(java.util.Map<String, Integer> values) {
+        for (java.util.Map.Entry<String, Integer> e : values.entrySet()) {
+            String key = e.getKey();
+            int value = e.getValue() == null ? 0 : e.getValue();
+            if (KEY_HIDE_BOTTOM_BAR.equals(key)) {
+                hideBottomBar = value == 1;
+            } else if (KEY_HIDE_THREE_DOT.equals(key)) {
+                hideThreeDot = value == 1;
+            } else if (KEY_ENABLE_DOCK.equals(key)) {
+                enableDock = value == 1;
+            } else if (KEY_UNLOCK_LIMIT.equals(key)) {
+                unlockFloatLimit = value == 1;
+            } else if (KEY_THEME_MODE.equals(key)) {
+                themeMode = value;
+            } else if (KEY_LIVE_PREVIEW.equals(key)) {
+                livePreview = value == 1;
+            }
+        }
+        configLoaded = true;
+        DockLive.setLivePreviewEnabled(livePreview);
+        bootstrapStoreOnce();
+        XposedBridge.log(TAG + " config(provider async) -> hideBottomBar=" + hideBottomBar
+                + " hideThreeDot=" + hideThreeDot
+                + " enableDock=" + enableDock
+                + " unlockFloatLimit=" + unlockFloatLimit
+                + " livePreview=" + livePreview);
+    }
+
+    /** 配置后台查询专用单线程。 */
+    private static synchronized Handler configWorker() {
+        if (sConfigWorker == null) {
+            android.os.HandlerThread t = new android.os.HandlerThread("freewindow-config");
+            t.start();
+            sConfigWorker = new Handler(t.getLooper());
+        }
+        return sConfigWorker;
+    }
+
+    /** 主线程 Handler（system_server 的 main looper）。 */
+    private static synchronized Handler configMain() {
+        if (sConfigMain == null) sConfigMain = new Handler(Looper.getMainLooper());
+        return sConfigMain;
     }
 
     private void loadFromXSharedPrefs() {
@@ -321,6 +404,8 @@ public class MainHook implements IXposedHookLoadPackage {
                 + " unlockFloatLimit=" + unlockFloatLimit
                 + " livePreview=" + livePreview
                 + " themeMode=" + themeMode);
+        // 推送到新值后立刻刷已存在的标题栏，不必等用户重开窗口。
+        refreshCaptionPolicies();
     }
 
     /** 当前开关快照，交给 SettingsStore 落盘用。 */
@@ -375,8 +460,12 @@ public class MainHook implements IXposedHookLoadPackage {
         } catch (Throwable t) {
             XposedBridge.log(TAG + " SettingsStore install failed: " + t.getMessage());
         }
+        // 落盘文件已经是权威：里面就是用户上次的选择，不能再让 xprefs 覆盖它。
+        // 只有文件缺失（首次安装 / 被清理）时才退回 xprefs 读一次做自举。
         try {
-            loadFromXSharedPrefs();
+            if (!SettingsStore.isAuthoritative()) {
+                loadFromXSharedPrefs();
+            }
         } catch (Throwable t) {
             XposedBridge.log(TAG + " load config before hook failed: " + t.getMessage());
         }
@@ -889,33 +978,11 @@ public class MainHook implements IXposedHookLoadPackage {
                             try {
                                 Object thisObj = param.thisObject;
                                 loadConfig(thisObj);
-                                // 配置读取失败（如重启后模块app未启动）时，使用默认值 true
-
-                                // ---- 隐藏底部手势小横条（开关：hide_bottom_bar） ----
-                                if (hideBottomBar) {
-                                    View bottomFrame = (View) XposedHelpers.getObjectField(thisObj, "mBottomFrame");
-                                    View bottomHandleView = (View) XposedHelpers.getObjectField(thisObj, "mBottomHandleView");
-                                    View bottomHandleLongView = (View) XposedHelpers.getObjectField(thisObj, "mBottomHandleLongView");
-
-                                    if (bottomFrame != null) bottomFrame.setVisibility(View.GONE);
-                                    if (bottomHandleView != null) bottomHandleView.setVisibility(View.GONE);
-                                    if (bottomHandleLongView != null) bottomHandleLongView.setVisibility(View.GONE);
-                                    XposedBridge.log(TAG + " hidden freeform bottom handle bar");
+                                // 配置读取失败（如重启后模块 app 未启动）时，使用默认值 true
+                                if (thisObj instanceof View) {
+                                    trackCaptionView((View) thisObj);
                                 }
-
-                                // ---- 移除顶部三点菜单按钮（开关：hide_three_dot_menu） ----
-                                if (hideThreeDot && thisObj instanceof View) {
-                                    View captionRoot = (View) thisObj;
-                                    if (DUMP_CAPTION_TREE) {
-                                        dumpViewTree(captionRoot, 0);
-                                    }
-                                    View menuButton = removeThreeDotMenuButton(captionRoot);
-                                    if (menuButton != null) {
-                                        XposedBridge.log(TAG + " removed freeform three-dot menu button: " + describe(menuButton));
-                                    } else {
-                                        XposedBridge.log(TAG + " three-dot menu button not found (try DUMP_CAPTION_TREE=true to locate its id)");
-                                    }
-                                }
+                                applyCaptionPolicy(thisObj);
                             } catch (Throwable t) {
                                 XposedBridge.log(TAG + " initCaptionView hook error: " + t.getMessage());
                             }
@@ -2919,18 +2986,135 @@ public class MainHook implements IXposedHookLoadPackage {
         return true;
     }
 
-    /** 从父容器中干净移除视图（真正删掉而非隐藏）；若没有父容器则退化为 GONE。 */
+    /** 从父容器中干净移除视图（真正删掉而非隐藏），并把 parent/index 记下来以便按开关恢复。 */
     private void removeViewCleanly(View v) {
         if (v == null) return;
         ViewGroup parent = (v.getParent() instanceof ViewGroup) ? (ViewGroup) v.getParent() : null;
         if (parent != null) {
+            int index = parent.indexOfChild(v);
             try {
                 parent.removeView(v);
+                sPendingRemovedChild = new RemovedCaptionChild(parent, v, index);
                 return;
             } catch (Throwable ignored) {
             }
         }
         v.setVisibility(View.GONE);
+    }
+
+    /** 被摘下的三点按钮：记着原来的父容器和位置，关掉开关时按原样插回去。 */
+    private static final class RemovedCaptionChild {
+        private final java.lang.ref.WeakReference<ViewGroup> parent;
+        private final java.lang.ref.WeakReference<View> child;
+        private final int index;
+
+        RemovedCaptionChild(ViewGroup parent, View child, int index) {
+            this.parent = new java.lang.ref.WeakReference<>(parent);
+            this.child = new java.lang.ref.WeakReference<>(child);
+            this.index = index;
+        }
+
+        boolean restore() {
+            ViewGroup p = parent.get();
+            View c = child.get();
+            if (p == null || c == null) return false;
+            if (c.getParent() != null) return true;
+            try {
+                p.addView(c, Math.min(index, p.getChildCount()));
+                return true;
+            } catch (Throwable t) {
+                XposedBridge.log(TAG + " restore three-dot button failed: " + t.getMessage());
+                return false;
+            }
+        }
+    }
+
+    /** 把当前开关应用到某个标题栏实例；必须在它所属的 UI 线程上执行。 */
+    private void applyCaptionPolicy(Object captionObj) {
+        if (!(captionObj instanceof View)) return;
+        View root = (View) captionObj;
+
+        if (hideBottomBar) {
+            try {
+                View bottomFrame = (View) XposedHelpers.getObjectField(captionObj, "mBottomFrame");
+                View bottomHandleView = (View) XposedHelpers.getObjectField(captionObj, "mBottomHandleView");
+                View bottomHandleLongView = (View) XposedHelpers.getObjectField(captionObj, "mBottomHandleLongView");
+                if (bottomFrame != null) bottomFrame.setVisibility(View.GONE);
+                if (bottomHandleView != null) bottomHandleView.setVisibility(View.GONE);
+                if (bottomHandleLongView != null) bottomHandleLongView.setVisibility(View.GONE);
+                XposedBridge.log(TAG + " hidden freeform bottom handle bar");
+            } catch (Throwable t) {
+                XposedBridge.log(TAG + " hide bottom bar failed: " + t.getMessage());
+            }
+        }
+
+        if (hideThreeDot) {
+            if (sRemovedCaptionChildren.containsKey(root)) return;
+            if (DUMP_CAPTION_TREE) {
+                dumpViewTree(root, 0);
+            }
+            sPendingRemovedChild = null;
+            View menuButton = removeThreeDotMenuButton(root);
+            if (menuButton != null) {
+                RemovedCaptionChild removed = sPendingRemovedChild;
+                if (removed != null) sRemovedCaptionChildren.put(root, removed);
+                XposedBridge.log(TAG + " removed freeform three-dot menu button: " + describe(menuButton));
+            } else {
+                XposedBridge.log(TAG + " three-dot menu button not found (try DUMP_CAPTION_TREE=true to locate its id)");
+            }
+        } else {
+            RemovedCaptionChild removed = sRemovedCaptionChildren.remove(root);
+            if (removed != null && removed.restore()) {
+                XposedBridge.log(TAG + " restored freeform three-dot menu button");
+            }
+        }
+    }
+
+    /** 登记标题栏实例，开关变化时可被就地刷新（弱引用，不拖住窗口）。 */
+    private static void trackCaptionView(View v) {
+        if (v == null) return;
+        synchronized (sCaptionViews) {
+            java.util.Iterator<java.lang.ref.WeakReference<View>> it = sCaptionViews.iterator();
+            while (it.hasNext()) {
+                View alive = it.next().get();
+                if (alive == null) {
+                    it.remove();
+                    continue;
+                }
+                if (alive == v) return;
+            }
+            sCaptionViews.add(new java.lang.ref.WeakReference<>(v));
+        }
+    }
+
+    /** 开关变化后刷新所有已存在的标题栏：抛到各自的 UI 线程执行，避免跨线程碰 View。 */
+    private static void refreshCaptionPolicies() {
+        final MainHook hook = sInstance;
+        if (hook == null) return;
+        final List<View> aliveViews = new ArrayList<>();
+        synchronized (sCaptionViews) {
+            java.util.Iterator<java.lang.ref.WeakReference<View>> it = sCaptionViews.iterator();
+            while (it.hasNext()) {
+                View v = it.next().get();
+                if (v == null) {
+                    it.remove();
+                    continue;
+                }
+                aliveViews.add(v);
+            }
+        }
+        for (final View v : aliveViews) {
+            v.post(new Runnable() {
+                @Override
+                public void run() {
+                    try {
+                        hook.applyCaptionPolicy(v);
+                    } catch (Throwable t) {
+                        XposedBridge.log(TAG + " refresh caption failed: " + t.getMessage());
+                    }
+                }
+            });
+        }
     }
 
     /** 生成便于阅读的视图描述，用于日志。 */

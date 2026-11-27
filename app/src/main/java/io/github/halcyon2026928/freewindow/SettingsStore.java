@@ -39,18 +39,27 @@ final class SettingsStore {
     private static volatile boolean sInstalled;
     /** 上一次落盘的内容，用来避免每次查询都重写同一个文件。 */
     private static volatile Map<String, String> sPersisted;
+    /** 文件里已经有权威配置：此后开关只认它，xprefs / provider 仅在缺文件时用于自举。 */
+    private static volatile boolean sAuthoritative;
+    /** 推送广播是否已经注册成功（注册点挪到 AMS 就绪后，可能重入，必须幂等）。 */
+    private static volatile boolean sReceiverRegistered;
 
     private SettingsStore() {
     }
 
-    /** 装钩子时调一次：先读文件把开关恢复成用户上次的选择，再注册接收 app 的推送。 */
+    /** 装钩子时调一次：先读文件把开关恢复成用户上次的选择，再等 AMS 就绪注册推送接收器。 */
     static void install(MainHook hook, ClassLoader cl) {
         if (sInstalled) return;
         sInstalled = true;
         sHook = hook;
         sContext = systemContext(cl);
         restore();
-        registerReceiver();
+        registerReceiverSoon(cl);
+    }
+
+    /** 落盘里已有权威配置时为 true；调用方据此决定是否还要读 xprefs / provider。 */
+    static boolean isAuthoritative() {
+        return sAuthoritative;
     }
 
     /** 开机恢复：系统进程比模块 app 早，必须用上次落盘的值先跑起来。 */
@@ -61,6 +70,7 @@ final class SettingsStore {
             return;
         }
         sPersisted = map;
+        sAuthoritative = true;
         apply(map);
         log("restored " + map.size() + " keys from " + storeFile().getAbsolutePath());
     }
@@ -92,6 +102,7 @@ final class SettingsStore {
             persist(map);
             sPersisted = map;
         }
+        sAuthoritative = true;
         apply(map);
         log("pushed " + map.size() + " keys, written=" + (!same));
     }
@@ -106,6 +117,7 @@ final class SettingsStore {
             if (map.equals(sPersisted)) return;
             persist(map);
             sPersisted = map;
+            sAuthoritative = true;
             log("saved current " + map.size() + " keys");
         } catch (Throwable t) {
             log("saveCurrent failed: " + t.getMessage());
@@ -171,11 +183,53 @@ final class SettingsStore {
         return new File(dir, STORE_NAME);
     }
 
-    private static void registerReceiver() {
+    /**
+     * 推送接收器必须在 AMS 就绪后再注册。
+     *
+     * <p>装 hook 那一刻 ActivityThread 的系统 Context 里 IActivityManager 还是 null，
+     * 直接 registerReceiver 会抛 "on a null object reference"；这条通道只有这一次机会，
+     * 失败后整台机器直到下次重启都收不到推送——开关就表现为"改了不生效"。
+     * 这里先试一次（AMS 已经起来的情况），没成就在 AMS 就绪点补注册。</p>
+     */
+    private static void registerReceiverSoon(ClassLoader cl) {
+        if (tryRegisterReceiver()) return;
+        try {
+            Class<?> ams = XposedHelpers.findClass(
+                    "com.android.server.am.ActivityManagerService", cl);
+            XposedHelpers.findAndHookMethod(ams, "systemReady", Runnable.class, new XC_MethodHook() {
+                @Override
+                protected void afterHookedMethod(MethodHookParam param) {
+                    tryRegisterReceiver();
+                }
+            });
+            log("push channel will attach at AMS.systemReady");
+            return;
+        } catch (Throwable t) {
+            log("AMS.systemReady hook failed: " + t.getMessage());
+        }
+        // 退路：systemReady 被厂商改名/换签名时，用 setSystemProcess（AMS 构造后必调）。
+        try {
+            Class<?> ams = XposedHelpers.findClass(
+                    "com.android.server.am.ActivityManagerService", cl);
+            XposedHelpers.findAndHookMethod(ams, "setSystemProcess", new XC_MethodHook() {
+                @Override
+                protected void afterHookedMethod(MethodHookParam param) {
+                    tryRegisterReceiver();
+                }
+            });
+            log("push channel will attach at AMS.setSystemProcess");
+        } catch (Throwable t) {
+            log("push channel hook failed: " + t.getMessage());
+        }
+    }
+
+    /** 注册推送接收器；可重入，成功一次就不再试。 */
+    private static synchronized boolean tryRegisterReceiver() {
+        if (sReceiverRegistered) return true;
         Context ctx = sContext;
         if (ctx == null) {
             log("system context unavailable, push channel disabled");
-            return;
+            return false;
         }
         try {
             IntentFilter filter = new IntentFilter(ACTION_PUSH);
@@ -197,9 +251,12 @@ final class SettingsStore {
                     onPushFromApp(intent.getExtras());
                 }
             }, filter, Context.RECEIVER_EXPORTED);
+            sReceiverRegistered = true;
             log("push channel ready");
+            return true;
         } catch (Throwable t) {
             log("register receiver failed: " + t.getMessage());
+            return false;
         }
     }
 

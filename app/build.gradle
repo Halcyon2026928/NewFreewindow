@@ -11,8 +11,8 @@ android {
         // libxposed/api（现代 Xposed API）要求 minSdk 26。
         minSdk 26
         targetSdk 32
-        versionCode 35
-        versionName "4.0.1"
+        versionCode 36
+        versionName "4.0.2"
     }
 
     buildTypes {
